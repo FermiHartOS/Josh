@@ -1,0 +1,16 @@
+# Binários e objetos de build
+Build/
+*.o
+*.bin
+myos.bin
+fermihart.bin
+
+# Arquivos temporários
+temp_file
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
