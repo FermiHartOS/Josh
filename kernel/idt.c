@@ -22,33 +22,59 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
+/**
+ * @file kernel/idt.c
+ * @brief Implementação da Interrupt Descriptor Table (IDT) para o jOSh OS.
+ */
 
-#include <stdint.h>
+#include <idt.h>
+#include <vga.h>
+#include <keyboard.h>
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+// Tabela global de 256 entradas
+static struct idt_entry idt[256];
+static struct idt_ptr idtp;
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
+// Protótipos dos handlers (implementados em ASM em idt.asm)
+extern void irq0_handler();
+extern void irq1_handler();
+extern void div_by_zero_handler();
 
-#endif
+// Função auxiliar para configurar uma porta
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+    idt[num].offset_low = base & 0xFFFF;
+    idt[num].offset_high = (base >> 16) & 0xFFFF;
+    idt[num].selector = sel;
+    idt[num].zero = 0;
+    idt[num].type_attr = flags;
+}
+
+// Função externa definida em ASM para carregar o registrador IDTR
+extern void idt_load(uint32_t base, uint16_t limit);
+
+void idt_install() {
+    // Limpa a tabela inteira
+    for (int i = 0; i < 256; i++) {
+        idt_set_gate(i, 0, 0, 0);
+    }
+
+    // Configura o ponteiro
+    idtp.limit = sizeof(struct idt_entry) * 256 - 1;
+    idtp.base = (uint32_t)&idt;
+
+    // --- Exceções Críticas (CPU) ---
+    // Divisão por zero (vetor 0)
+    idt_set_gate(0, (uint32_t)div_by_zero_handler, 0x08, 0x8E);
+
+    // --- IRQs de Hardware (Mapeados a partir de 0x20) ---
+    // Timer (IRQ0) -> Vetor 0x20
+    idt_set_gate(IRQ0_VECTOR, (uint32_t)irq0_handler, 0x08, 0x8E);
+    
+    // Teclado (IRQ1) -> Vetor 0x21
+    idt_set_gate(IRQ1_VECTOR, (uint32_t)irq1_handler, 0x08, 0x8E);
+
+    // Carrega a IDT no processador via instrução LGDT
+    idt_load((uint32_t)&idtp, idtp.limit);
+    
+    vga_put_string("[IDT] Table Installed Successfully.\n", COLOR_GREEN);
+}

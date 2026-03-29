@@ -1,4 +1,10 @@
-/*
+#!/bin/bash
+
+# 1. Criar a nova estrutura de diretórios
+mkdir -p Include Drivers/Keyboard Drivers/VGA User/MiniBash Kernel Boot Build Utils
+
+# 2. Definir o Header Disruptivo
+HEADER_TEXT='/*
  *  _______________________________________________________________________________________
  * |                                                                                       |
  * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
@@ -21,34 +27,34 @@
  *  redistribuição ou menção pública:
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
- */
-#ifndef VGA_H
-#define VGA_H
+ */'
 
-#include <stdint.h>
+# Função para aplicar o header
+apply_header() {
+    FILE=$1
+    if [ -f "$FILE" ]; then
+        echo "$HEADER_TEXT" > temp_file
+        cat "$FILE" >> temp_file
+        mv temp_file "$FILE"
+        echo "Header aplicado em: $FILE"
+    fi
+}
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+# 3. Mover arquivos para os novos locais (ajuste se os nomes atuais forem diferentes)
+mv kernel/boot.asm Boot/ 2>/dev/null
+mv kernel/kernel.c Kernel/ 2>/dev/null
+mv kernel/gdt.c Kernel/ 2>/dev/null
+mv kernel/keyboard.c Drivers/Keyboard/ 2>/dev/null
+mv kernel/vga.c Drivers/VGA/ 2>/dev/null
+mv user/MiniBash.c User/MiniBash/ 2>/dev/null
+mv common/*.h Include/ 2>/dev/null
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
+# 4. Aplicar Headers em todos os arquivos .c, .h e .asm
+find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.asm" \) | while read -r file; do
+    apply_header "$file"
+done
 
-#endif
+# 5. Criar arquivos de documentação se não existirem
+touch Todo.md Changelog.md Readme.md
+
+echo "Estrutura jOSh atualizada com sucesso!"

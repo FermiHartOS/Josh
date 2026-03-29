@@ -22,33 +22,18 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
+
+#ifndef GDT_H
+#define GDT_H
 
 #include <stdint.h>
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+/**
+ * @brief Instala a Global Descriptor Table (GDT)
+ * 
+ * Configura os segmentos de memória (Código e Dados) e carrega a tabela
+ * no processador via instrução LGDT.
+ */
+void gdt_install();
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
-
-#endif
+#endif /* GDT_H */

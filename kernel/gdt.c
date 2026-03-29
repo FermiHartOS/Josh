@@ -22,33 +22,45 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
 
 #include <stdint.h>
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+struct gdt_entry {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t  base_middle;
+    uint8_t  access;
+    uint8_t  granularity;
+    uint8_t  base_high;
+} __attribute__((packed));
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
+struct gdt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
 
-#endif
+struct gdt_entry gdt[3];
+struct gdt_ptr gp;
+
+extern void gdt_flush(uint32_t);
+
+void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
+    gdt[num].base_low    = (base & 0xFFFF);
+    gdt[num].base_middle = (base >> 16) & 0xFF;
+    gdt[num].base_high   = (base >> 24) & 0xFF;
+    gdt[num].limit_low   = (limit & 0xFFFF);
+    gdt[num].granularity = (limit >> 16) & 0x0F;
+    gdt[num].granularity |= gran & 0xF0;
+    gdt[num].access      = access;
+}
+
+void gdt_install() {
+    gp.limit = (sizeof(struct gdt_entry) * 3) - 1;
+    gp.base  = (uint32_t)&gdt;
+
+    gdt_set_gate(0, 0, 0, 0, 0);                // Null segment
+    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); // Code segment
+    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); // Data segment
+
+    gdt_flush((uint32_t)&gp);
+}

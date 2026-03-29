@@ -22,33 +22,34 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
+
+#ifndef IDT_H
+#define IDT_H
 
 #include <stdint.h>
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+// Estrutura de entrada da IDT (32 bits)
+struct idt_entry {
+    uint16_t offset_low;   // Bits 0-15 do endereço
+    uint16_t selector;     // Selector do segmento (geralmente 0x08 para Code Segment)
+    uint8_t  zero;         // Sempre 0
+    uint8_t  type_attr;    // Tipo e atributos (ex: 0x8E para porta de chamada)
+    uint16_t offset_high;  // Bits 16-31 do endereço
+} __attribute__((packed));
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
+// Estrutura do ponteiro da IDT (sendo carregado no registrador IDTR)
+struct idt_ptr {
+    uint16_t limit;        // Tamanho da tabela (256 * 8 - 1 = 2047)
+    uint32_t base;         // Endereço de início da tabela na memória
+} __attribute__((packed));
+
+// Protótipos das funções
+void idt_install();
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
+
+// Definição dos vetores de interrupção (Exceções e Hardware)
+#define IRQ0_VECTOR 0x20
+#define IRQ1_VECTOR 0x21
+#define IRQ_KBD     IRQ1_VECTOR // Teclado usa IRQ1
 
 #endif

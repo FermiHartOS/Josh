@@ -22,33 +22,44 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
+/**
+ * @file kernel/kernel.c
+ * @brief Entry point do jOSh OS - Monólito Reativo
+ */
 
 #include <stdint.h>
+#include <vga.h>
+#include <keyboard.h>
+#include <shell.h>
+#include <gdt.h>
+#include <idt.h>
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+void kernel_main() {
+    // --- 1. Instala a GDT (Global Descriptor Table) ---
+    // Define os segmentos de memória (Código e Dados) para o Kernel
+    gdt_install();
+    
+    vga_init();
+    vga_put_string("jOSh OS [Reactive Monolithic Kernel]\\n", COLOR_CYAN);
+    vga_put_string("[GDT] Memory Segments Initialized... OK\\n", COLOR_GREEN);
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
+    // --- 2. Instala a IDT (Interrupt Descriptor Table) ---
+    // Habilita interrupções de hardware (Teclado, Timer, etc.)
+    idt_install();
+    vga_put_string("[IDT] Interrupt Vector Table Installed... OK\\n", COLOR_GREEN);
+    vga_put_string("[CPU] Hardware Interrupts ENABLED (STI)... OK\\n", COLOR_LIGHT_GREEN);
 
-#endif
+    vga_put_string("\\nLoading System Modules: ", COLOR_LIGHT_GREY);
+    for(int i = 0; i < 20; i++) {
+        vga_put_char('#', COLOR_GREEN);
+        // Delay para efeito visual
+        for(volatile int d = 0; d < 3000000; d++); 
+    }
+    
+    vga_put_string(" DONE!\\n", COLOR_GREEN);
+    vga_put_string("\\nThe system is now REACTIVE. Waiting for events...\\n", COLOR_WHITE);
+
+    // Inicia o Shell interativo
+    // O start_shell agora lê do buffer circular preenchido pela IDT
+    start_shell();
+}

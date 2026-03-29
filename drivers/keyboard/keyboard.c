@@ -22,33 +22,34 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-#ifndef VGA_H
-#define VGA_H
+#include <keyboard.h>
 
-#include <stdint.h>
+// Lê um byte de uma porta I/O
+uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
 
-#define COLOR_BLACK 0
-#define COLOR_BLUE 1
-#define COLOR_GREEN 2
-#define COLOR_CYAN 3
-#define COLOR_RED 4
-#define COLOR_MAGENTA 5
-#define COLOR_BROWN 6
-#define COLOR_LIGHT_GREY 7
-#define COLOR_DARK_GREY 8
-#define COLOR_LIGHT_BLUE 9
-#define COLOR_LIGHT_GREEN 10
-#define COLOR_LIGHT_CYAN 11
-#define COLOR_LIGHT_RED 12
-#define COLOR_LIGHT_MAGENTA 13
-#define COLOR_YELLOW 14
-#define COLOR_WHITE 15
+char get_keycode() {
+    // Polling básico do buffer do teclado (Porta 0x64 status, 0x60 data)
+    while (!(inb(0x64) & 1));
+    return inb(0x60);
+}
 
-void vga_init();
-void vga_clear();
-void vga_set_color(uint8_t color);
-void vga_put_char(char c, uint8_t color);
-void vga_put_string(const char* str, uint8_t color);
-void vga_update_cursor(int x, int y);
-
-#endif
+// Mapa simplificado US-QWERTY
+char keycode_to_char(uint8_t code) {
+    switch(code) {
+        case 0x1E: return 'a'; case 0x30: return 'b'; case 0x2E: return 'c';
+        case 0x20: return 'd'; case 0x12: return 'e'; case 0x21: return 'f';
+        case 0x22: return 'g'; case 0x23: return 'h'; case 0x17: return 'i';
+        case 0x24: return 'j'; case 0x25: return 'k'; case 0x26: return 'l';
+        case 0x32: return 'm'; case 0x31: return 'n'; case 0x18: return 'o';
+        case 0x19: return 'p'; case 0x10: return 'q'; case 0x13: return 'r';
+        case 0x1F: return 's'; case 0x14: return 't'; case 0x16: return 'u';
+        case 0x2F: return 'v'; case 0x11: return 'w'; case 0x2D: return 'x';
+        case 0x15: return 'y'; case 0x2C: return 'z'; case 0x39: return ' ';
+        case 0x1C: return '\n'; case 0x0E: return '\b';
+        default: return 0;
+    }
+}

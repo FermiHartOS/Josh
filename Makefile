@@ -1,78 +1,76 @@
-# --- Configurações de Compilação ---
+# --- F E R M I  ∞  H A R T  OS [jOSh] ---
 CC      = gcc
 AS      = nasm
-LD      = ld
+IMG     = build/jOSh.img
 
-# Flags de Compilação C
-# -Werror: Warning é Erro. Pureza total.
+# Flags de Compilação
 CFLAGS  = -m32 -ffreestanding -O2 -Wall -Wextra -Wpedantic -Werror \
-          -fno-stack-protector -I include -nostdlib -fno-pie
-
-# Flags de Assembly
-ASFLAGS = -f elf32
+          -I include -fno-stack-protector -fno-pie -nostdlib
 
 # Flags do Linker
-# --build-id=none: Remove o warning de build-id ignorado
-# -n: Nmagic, desativa alinhamentos de página do Linux
-LDFLAGS = -m32 -T linker.ld -nostdlib -z noexecstack -no-pie -n -Wl,--build-id=none
-# --- Arquivos ---
-BIN     = myos.bin
-SRCDIR  = src
-OBJDIR  = obj
+LDFLAGS = -m32 -T Linker.ld -nostdlib -z noexecstack -no-pie -n -Wl,--build-id=none
 
-OBJS    = $(OBJDIR)/boot.o \
-          $(OBJDIR)/kernel.o \
-          $(OBJDIR)/vga.o \
-          $(OBJDIR)/keyboard.o \
-          $(OBJDIR)/MiniBash.o \
-          $(OBJDIR)/gdt.o
+# Mapeamento de Objetos (Organizado por subpastas)
+OBJS = build/boot.o \
+       build/kernel.o \
+       build/gdt.o \
+       build/vga.o \
+       build/keyboard.o \
+       build/minibash.o \
+       build/idt.o \
+ 	build/idt_asm.o
+ 	
+all: build_dir $(IMG) verify
 
-# --- Regras Principais ---
-
-all: $(OBJDIR) $(BIN) verify
-	@echo "--- [SUCESSO] Fermi Hart OS pronto para boot! ---"
-
-# Linkagem e Verificação
-$(BIN): $(OBJS)
+$(IMG): $(OBJS)
 	@echo "[LINK] $@"
 	@$(CC) $(LDFLAGS) -o $@ $(OBJS) -lgcc
 
-# Nova Regra de Verificação Automática
-verify:
-	@echo "[CHECK] Verificando integridade Multiboot..."
-	@if grub-file --is-x86-multiboot $(BIN); then \
-		echo "  > Kernel validado com sucesso!"; \
-	else \
-		echo "  > [ERRO] Kernel inválido para Multiboot!"; \
-		rm $(BIN); exit 1; \
-	fi
+# Regras de Compilação (Busca em todos os subdiretórios)
+build/boot.o: boot/boot.asm
+	@echo "[AS] $<"
+	@$(AS) -f elf32 $< -o $@
 
-# Compilação C
-$(OBJDIR)/%.o: $(SRCDIR)/%.c
-	@echo "[CC] $<"
+build/kernel.o: kernel/kernel.c
+	@echo "[KERN] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-# Compilação Assembly
-$(OBJDIR)/%.o: $(SRCDIR)/%.asm
+build/gdt.o: kernel/gdt.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/vga.o: drivers/vga/vga.c
+	@echo "[DRV] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/keyboard.o: drivers/keyboard/keyboard.c
+	@echo "[DRV] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/minibash.o: user/minibash/minibash.c
+	@echo "[APP] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/idt.o: kernel/idt.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/idt_asm.o: kernel/idt.asm
 	@echo "[AS] $<"
-	@$(AS) $(ASFLAGS) $< -o $@
+	@$(AS) -f elf32 $< -o $@
 
-$(OBJDIR):
-	@mkdir -p $(OBJDIR)
 
-# --- Execução ---
+build_dir:
+	@mkdir -p build
+
+verify:
+	@echo "[CHECK] Verificando Integridade..."
+	@grub-file --is-x86-multiboot $(IMG) && echo "  > jOSh Kernel VALIDADO" || exit 1
 
 run: all
-	@echo "[QEMU] Iniciando Fermi Hart OS..."
-	@qemu-system-i386 -kernel $(BIN) -machine type=pc-i440fx-3.1 -serial stdio
-
-# Modo puramente via terminal (Serial)
-run-cli: all
-	@echo "[QEMU] Iniciando em modo Serial (sem janela)..."
-	@qemu-system-i386 -kernel $(BIN) -nographic -serial mon:stdio
+	@echo "[QEMU] Iniciando jOSh OS..."
+	@qemu-system-i386 -kernel build/jOSh.img -machine type=pc-i440fx-3.1 -serial mon:stdio
 
 clean:
-	@echo "[CLEAN] Limpando build..."
-	@rm -rf $(OBJDIR) $(BIN)
-
-.PHONY: all run run-cli clean verify
+	@echo "[CLEAN] Removendo build/..."
+	@rm -rf build/

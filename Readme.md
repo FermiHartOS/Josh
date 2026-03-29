@@ -1,5 +1,4 @@
 # Fermi Hart OS
-Projeto de Microkernel simples com shell interativo.
 
 ## Compilação
 Requisitos: `gcc-multilib`, `nasm`, `qemu-system-i386`.
