@@ -2,6 +2,7 @@
  *  HEADER FERMI HART OS (Padrão Oficial)
  */
 #include <nosound.h>
+#include <vga.h> /* Para debug visual se necessário */
 
 /* ── Ports ─────────────────────────────────────────────── */
 #define SPEAKER_CTRL_PORT 0x61  /* Keyboard Controller (Bit 0 & 1 = Speaker Gate) */
@@ -28,13 +29,16 @@ static void nosound_delay_ms(uint32_t ms) {
 
 /**
  * @brief Habilita o gate do speaker no Port 0x61.
+ *        Bits 0 e 1 devem estar SETADOS para permitir saída do PIT Ch2.
  */
 void speaker_init(void) {
     uint8_t val = inb(SPEAKER_CTRL_PORT);
-    /* Bits 0 e 1 devem estar setados para permitir saída do PIT Ch2 no Speaker */
-    if ((val & 0x03) != 0x03) {
-        outb(SPEAKER_CTRL_PORT, val | 0x03);
-    }
+    /* Força os bits 0 e 1 para 1 (Speaker Gate Open) */
+    val |= 0x03; 
+    outb(SPEAKER_CTRL_PORT, val);
+    
+    /* Debug opcional: Imprime 'S' se quiser ver se chegou aqui */
+    // vga_put_char('S', COLOR_GREEN); 
 }
 
 /**
