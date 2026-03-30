@@ -3,20 +3,20 @@ CC      = gcc
 AS      = nasm
 IMG     = build/jOSh.img
 
-# Flags de Compilação
 CFLAGS  = -m32 -ffreestanding -O2 -Wall -Wextra -Wpedantic -Werror \
           -I include -fno-stack-protector -fno-pie -nostdlib
 
-# Flags do Linker
 LDFLAGS = -m32 -T Linker.ld -nostdlib -z noexecstack -no-pie -n -Wl,--build-id=none
 
-# Mapeamento de Objetos
 OBJS = build/boot.o \
        build/kernel.o \
        build/gdt.o \
        build/timer.o \
+       build/pmm.o \
+       build/kmalloc.o \
        build/vga.o \
        build/keyboard.o \
+       build/splash.o \
        build/minibash.o \
        build/idt.o \
        build/idt_asm.o \
@@ -28,7 +28,6 @@ $(IMG): $(OBJS)
 	@echo "[LINK] $@"
 	@$(CC) $(LDFLAGS) -o $@ $(OBJS) -lgcc
 
-# Regras de Compilação
 build/boot.o: boot/boot.asm
 	@echo "[AS] $<"
 	@$(AS) -f elf32 $< -o $@
@@ -45,11 +44,23 @@ build/timer.o: kernel/timer.c
 	@echo "[KERN] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
+build/pmm.o: kernel/pmm.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/kmalloc.o: kernel/kmalloc.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
 build/vga.o: drivers/vga/vga.c
 	@echo "[DRV] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 build/keyboard.o: drivers/keyboard/keyboard.c
+	@echo "[DRV] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/splash.o: drivers/splash/splash.c
 	@echo "[DRV] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
@@ -79,6 +90,14 @@ verify:
 run: all
 	@echo "[QEMU] Iniciando jOSh OS..."
 	@qemu-system-i386 -kernel build/jOSh.img -machine type=pc-i440fx-3.1 -serial mon:stdio
+
+nosound: all
+	@echo "[QEMU] Iniciando jOSh OS (WSL2 Audio Enabled)..."
+	@qemu-system-i386 \
+		-kernel build/jOSh.img \
+		-machine type=pc-i440fx-3.1,pcspk-audiodev=snd0 \
+		-audiodev pa,id=snd0 \
+		-serial mon:stdio
 
 clean:
 	@echo "[CLEAN] Removendo build/..."

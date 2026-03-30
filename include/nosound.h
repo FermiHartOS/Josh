@@ -53,4 +53,19 @@ void speaker_off(void);
  */
 void speaker_beep(uint32_t freq, uint32_t duration_ms);
 
+/**
+ * @brief Toca um tom "suave" usando PWM (Ligar/Desligar rápido)
+ *        Isso simula volume baixo e suaviza o som agressivo do PC Speaker.
+ * @param freq Frequência em Hz.
+ * @param duration_ms Duração total em ms.
+ */
+void speaker_beep_soft(uint32_t freq, uint32_t duration_ms);
+
+/**
+ * @brief Delay simples baseado em loops para uso interno do driver de áudio.
+ *        Exposto aqui para permitir controle fino no shell (ex: pausas na música).
+ * @param ms Milissegundos a esperar.
+ */
+void nosound_delay_ms(uint32_t ms);
+
 #endif /* NOSOUND_H */

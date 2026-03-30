@@ -1,51 +1,48 @@
 /**
  * @file linker.ld
- * @brief Linker script para o Fermi Hart OS Pro.
+ * @brief Linker script para o jOSh OS.
  * Garante que o cabeçalho Multiboot esteja nos primeiros 8KB do binário.
+ * Exporta _kernel_end para o PMM saber onde a memória livre começa.
  */
 
 ENTRY(_start)
 
-/* Define os cabeçalhos de programa para permissões de memória (Segurança) */
 PHDRS
 {
-    text PT_LOAD FLAGS(5); /* Read (4) + Execute (1) */
-    data PT_LOAD FLAGS(6); /* Read (4) + Write (2) */
+    text PT_LOAD FLAGS(5); /* Read + Execute */
+    data PT_LOAD FLAGS(6); /* Read + Write */
 }
 
 SECTIONS
 {
-    /* O kernel começa em 1MB (convencional para kernels x86) */
     . = 1M;
 
-    /* SEÇÃO DE CÓDIGO */
     .text BLOCK(4K) : ALIGN(4K)
     {
-        /* O cabeçalho Multiboot PRECISA estar no topo para o QEMU/GRUB encontrar */
         KEEP(*(.multiboot))
         *(.text)
     } :text
 
-    /* SEÇÃO DE DADOS APENAS LEITURA (Constantes) */
     .rodata BLOCK(4K) : ALIGN(4K)
     {
         *(.rodata)
     } :data
 
-    /* SEÇÃO DE DADOS (Variáveis inicializadas) */
     .data BLOCK(4K) : ALIGN(4K)
     {
         *(.data)
     } :data
 
-    /* SEÇÃO BSS (Variáveis globais não inicializadas e Stack) */
     .bss BLOCK(4K) : ALIGN(4K)
     {
         *(COMMON)
         *(.bss)
     } :data
 
-    /* Descarte de seções desnecessárias que podem poluir o binário */
+    /* Símbolo que marca o fim do kernel — PMM aloca a partir daqui */
+    . = ALIGN(4K);
+    _kernel_end = .;
+
     /DISCARD/ :
     {
         *(.comment)
@@ -70,11 +67,14 @@ OBJS = build/boot.o \
        build/kernel.o \
        build/gdt.o \
        build/timer.o \
+       build/pmm.o \
+       build/kmalloc.o \
        build/vga.o \
        build/keyboard.o \
        build/minibash.o \
        build/idt.o \
-       build/idt_asm.o
+       build/idt_asm.o \
+       build/nosound.o
 
 all: build_dir $(IMG) verify
 
@@ -99,6 +99,14 @@ build/timer.o: kernel/timer.c
 	@echo "[KERN] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
+build/pmm.o: kernel/pmm.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+ 
+build/kmalloc.o: kernel/kmalloc.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
 build/vga.o: drivers/vga/vga.c
 	@echo "[DRV] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
@@ -119,6 +127,10 @@ build/idt_asm.o: kernel/idt.asm
 	@echo "[AS] $<"
 	@$(AS) -f elf32 $< -o $@
 
+build/nosound.o: drivers/nosound/nosound.c
+	@echo "[DRV] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
 build_dir:
 	@mkdir -p build
 
@@ -130,9 +142,130 @@ run: all
 	@echo "[QEMU] Iniciando jOSh OS..."
 	@qemu-system-i386 -kernel build/jOSh.img -machine type=pc-i440fx-3.1 -serial mon:stdio
 
+nosound: all
+	@echo "[QEMU] Iniciando jOSh OS (WSL2 Audio Enabled)..."
+	@qemu-system-i386 \
+		-kernel build/jOSh.img \
+		-machine type=pc-i440fx-3.1,pcspk-audiodev=snd0 \
+		-audiodev pa,id=snd0 \
+		-serial mon:stdio
+
 clean:
 	@echo "[CLEAN] Removendo build/..."
 	@rm -rf build/
+# Josh Operating System 
+
+## Compilação
+Requisitos: `gcc-multilib`, `nasm`, `qemu-system-i386`.
+
+1. Execute `make && make run`
+
+1.2. Tratamento de Exceções
+Atualmente só há handler para divisão por zero. Adicionar handlers genéricos para todas as exceções (0‑31) que imprimam o número e façam cli; hlt. Isso evita surpresas quando a CPU levantar uma exceção inesperada.
+
+1.3. Keyboard: Suporte a Shift
+O mapa de scancodes atualmente só gera letras minúsculas. Implementar um estado de shift (press/release) e converter para maiúsculas quando apropriado.
+
+1.4. VGA: Correção no Backspace
+No shell, quando o usuário pressiona backspace no início da linha, nada acontece (comportamento esperado). Mas o código atual em vga_put_char só apaga se cursor_x > 0. Isso está correto. Porém, se o cursor estiver na primeira coluna, ele não se move para a linha anterior. Para manter a UX, podemos ignorar – é aceitável.
+
+1.5. Shell: Comando help Dinâmico
+O help atual é uma lista estática. Podemos transformá-lo em uma função que itera sobre uma tabela de comandos, facilitando a adição de novos comandos sem alterar o help.
+
+1.6. Makefile: Dependências Automáticas
+Adicionar regras para gerar dependências (.d files) com -MMD do GCC, para que modificações em headers recompilam os arquivos corretos.
+
+1.7. Debug Serial
+Adicionar um driver serial mínimo (COM1) com funções serial_putchar e serial_puts. Usá-lo para logging em modo debug (via -d no QEMU). Isso ajuda a debugar exceções sem depender do VGA.
+
+2. Preparação para a Fase 2: Gerenciamento de Memória
+Antes de partir para alocadores e paging, precisamos de informações sobre a memória física e uma estrutura para gerenciá-la.
+
+2.1. Obter o Mapa de Memória via Multiboot
+O GRUB (ou QEMU) passa um ponteiro para a estrutura multiboot_info em EBX. Precisamos ler esse ponteiro no kernel_main e extrair a tabela de regiões de memória (mmap). Criar uma função que parseia essa tabela e armazena as regiões disponíveis.
+
+2.2. Physical Memory Manager (PMM)
+Implementar um bitmap de 4KB páginas. O bitmap pode ser alocado estáticamente (ex.: 128KB para 128MB de RAM). Funções:
+
+pmm_init(mmap_info): marca páginas reservadas (kernel, VGA, etc.) como usadas.
+
+pmm_alloc_page(): retorna endereço físico de uma página livre.
+
+pmm_free_page(addr).
+
+2.3. Simple Kernel Heap (kmalloc/kfree)
+Com o PMM, podemos construir um alocador de pequenos blocos baseado em linked lists (ex.: buddy system ou slab). Inicialmente, uma implementação simples de heap usando uma lista de blocos livres (first-fit) será suficiente para alocar estruturas do kernel (GDT, IDT, futuros processos).
+
+2.4. Paging (Pré‑requisito para multitasking)
+Habilitar paging é o próximo passo lógico:
+
+Criar um page directory e page tables para mapear os primeiros 4MB (identity mapping do kernel).
+
+Usar o PMM para alocar as páginas das tabelas.
+
+Em kernel.c, após o heap estar funcional, chamar paging_init().
+
+Por que paging agora? Porque é a base para proteção entre kernel e userland, e também para mapear memória dinâmica. Além disso, permite mapear os 4GB de forma limpa.
+
+3. Evolução do Shell para Usar o Heap
+Com kmalloc e kfree, podemos melhorar o shell:
+
+Histórico dinâmico (atualmente fixo em 16). Usar uma lista encadeada.
+
+Buffer de linha de comando alocado dinamicamente (sem limite fixo de 128).
+
+Comandos que geram saída podem ser armazenados em buffers alocados dinamicamente.
+
+4. Preparação para Multitasking (Fase 4)
+Multitasking exige:
+
+TSS (Task State Segment) para ring transitions.
+
+Context switch (salvar/restaurar registradores, alterar page directory).
+
+Interrupção do timer como agendador.
+
+4.1. TSS
+Adicionar uma entrada na GDT para o TSS. Inicializar uma TSS com ss0 e esp0 apontando para uma pilha de kernel (para quando user mode levantar interrupção).
+
+4.2. Estrutura de Processo
+Definir struct process contendo:
+
+pid
+
+page_directory*
+
+registers (EAX, EBX, etc., para salvar contexto)
+
+stack (kernel stack)
+
+state (RUNNING, READY, BLOCKED)
+
+next (lista encadeada)
+
+4.3. Agendador Round‑Robin
+Modificar o handler do timer (irq_handler_timer) para, a cada tick, chamar schedule(). O schedule escolhe o próximo processo da lista de prontos e chama uma função assembly (switch_to) que salva contexto atual e restaura o próximo.
+
+4.4. Syscalls
+Criar uma entrada na IDT (ex.: int 0x80) que recebe o número da syscall em EAX e executa uma tabela de funções do kernel (ex.: sys_write, sys_exit). Isso exigirá uma transição de ring 3 para ring 0.
+
+5. Melhorias na Experiência do Usuário (Sem perder a reatividade)
+Comandos de ajuda com descrição (já parcial, mas pode ser estendido).
+
+Variáveis de ambiente (ex.: PATH, HOME).
+
+Comando cd (mudar diretório atual) – mesmo sem filesystem, podemos ter um conceito de "caminho atual" para simular.
+
+Comando ps (listar processos) após multitasking.
+
+Comando kill (enviar sinal para processo).
+
+6. Documentação e Testes
+Documentar a API do kernel (funções de alocação, syscalls, etc.) em um arquivo docs/API.md.
+
+Adicionar um script de teste que executa uma sequência de comandos no shell e verifica a saída (usando QEMU com serial redirecionada).
+
+Criar um diagrama de arquitetura mostrando as camadas (VGA, GDT, IDT, PMM, Paging, etc.).
 ; boot.asm - Fermi Hart OS Pro (Versão Estável)
 ; boot/boot.asm - Versão Estável Final (Com Far Jump Corrigido)
 MBOOT_PAGE_ALIGN    equ 1<<0
@@ -187,6 +320,195 @@ gdt_flush:
 
 .flush_code:
     ret
+atualizacao
+
+# O Manifesto jOSh: A Revolução do Monólito Reativo
+
+**Autor:** Fermi Hart ∞  
+**Data:** 30 de Março de 2026  
+**Projeto:** jOSh OS (The Reactive Monolithic Kernel)  
+**Dedicado a:** Josh — cada byte deste sistema é uma carta ao futuro.
+
+---
+
+## 1. Por Que Estamos Aqui?
+
+O mundo dos sistemas operacionais estagnou em duas trincheiras: **Monolitos Obesos** e **Microkernels Lentos**.
+
+O Linux nasceu como um hack de terminal e cresceu até se tornar um leviatã de 30 milhões de linhas de código, onde contribuir exige mais conhecimento institucional do que técnico. Os microkernels (Minix, seL4, Fuchsia) prometem pureza através de mensagens entre processos, mas pagam o preço com latência, complexidade de IPC e uma base de contribuidores que nunca atinge massa crítica.
+
+Nós escolhemos **nenhum dos dois**.
+
+O **jOSh** não é uma variação. Não é um fork. É uma **rejeição filosófica** à arquitetura convencional. Não estamos construindo um sistema operacional para rodar em servidores corporativos ou laptops de escritório. Estamos provando que o hardware x86 ainda pode ser domado com elegância, pureza e reatividade absoluta — e que um sistema operacional pode ser lido inteiro, da primeira à última linha, por uma única pessoa em uma tarde.
+
+## 2. Nossa Disrupção: O Monólito Reativo
+
+Enquanto o Linux trata tudo como arquivos e espera que você pergunte "o que aconteceu?", o **jOSh** trata tudo como **Eventos Vivos** e responde antes que você pergunte.
+
+### O Fim do Polling
+
+Sistemas tradicionais desperdiçam ciclos preciosos da CPU verificando repetidamente se algo aconteceu. Isso é ineficiente. Isso é passivo.
+
+No jOSh, **o hardware grita e nós ouvimos**.
+
+A CPU fica em estado `hlt` — consumo mínimo, silêncio total — até que uma interrupção a acorde. Quando uma tecla é pressionada, o PIC 8259 dispara IRQ1, o handler em assembly puro lê o scancode, converte, deposita no buffer circular, envia EOI e retorna. Zero contexto de processo. Zero syscall. Zero overhead. O shell acorda do `hlt`, lê o buffer e reage.
+
+Isso não é teoria. É o que roda agora.
+
+### Arquitetura em Três Camadas de Hardware
+
+| Camada | Componente | Função |
+|--------|-----------|--------|
+| **Segmentação** | GDT (3 entradas) | Flat model 4GB — Code 0x08, Data 0x10. Proteção de memória antes que o código execute. |
+| **Interrupções** | IDT (256 entradas) + PIC remapeado | IRQ0 (Timer) → vetor 0x20, IRQ1 (Teclado) → vetor 0x21. Exceções da CPU nos vetores 0x00-0x1F. |
+| **I/O Direto** | VGA @ 0xB8000 | Escrita direta na memória de vídeo. Sem BIOS. Sem framebuffer abstrato. Cada pixel é um word: char + atributo. |
+
+### A Pureza do C e Assembly
+
+Não escondemos a mágica atrás de abstrações pesadas.
+
+**C99 Strict** com `-Wall -Wextra -Wpedantic -Werror`. Nenhum warning tolerado. Nenhuma extensão do compilador. Se o GCC reclama, o código não compila.
+
+**NASM Puro** para tudo que toca hardware diretamente: boot, GDT flush com far jump, handlers de interrupção com `pushad`/`popad`/`iret`, load da IDT. Cada instrução é intencional.
+
+**Sem libc. Sem stdlib. Sem malloc.** Nossas próprias implementações de `str_compare`, `str_copy`, `itoa`, `itoa_hex`. Cada função existe porque precisamos dela, não porque um framework decidiu que precisamos.
+
+## 3. O Que Já Funciona (e Como)
+
+Não prometemos features futuras sem entregar as presentes. Aqui está o estado atual do sistema, verificável no código fonte:
+
+### Boot Sequence (< 1 segundo)
+```
+_start (boot.asm)
+  └─ kernel_main()
+       ├─ vga_init()        → Limpa tela, cursor em (0,0)
+       ├─ gdt_install()     → 3 entradas, far jump para CS=0x08
+       ├─ idt_install()     → PIC remap + 256 gates + sti
+       └─ start_shell()     → MiniBash Pro, 100% IRQ-driven
+```
+
+### MiniBash Pro — Shell Reativo
+- **Leitura exclusiva via IRQ1** — zero polling da porta 0x60
+- **Histórico circular** (16 entradas) navegável com setas UP/DOWN
+- **Comandos nativos:** `help`, `clear`, `fetch`, `ver`, `mem`, `uptime`, `colors`, `history`, `echo`, `about`, `panic`, `halt`, `reboot`
+- **CPU em `hlt` entre teclas** — acorda apenas em interrupção
+- **Números, pontuação, backspace, enter** — mapa de scancodes completo
+
+### Driver de Teclado
+- Buffer circular lock-free de 256 bytes
+- Handler ISR em assembly (~20 instruções): `pushad` → segmentos → `call` → EOI → `popad` → `iret`
+- Conversão scancode→char com suporte a letras, números, pontuação e teclas especiais
+
+### VGA Driver
+- Escrita direta no buffer 0xB8000 (80x25, 16 cores)
+- Scroll automático, cursor hardware via portas 0x3D4/0x3D5
+- Backspace visual com apagamento de célula
+
+## 4. O Que Ninguém Fez Antes
+
+**Reatividade desde o primeiro byte pós-IDT.** Enquanto outros kernels gastam segundos inicializando subsistemas, o jOSh entra em modo reativo imediatamente após o `sti`. O shell não é um processo separado — é uma extensão viva do kernel, executando no mesmo ring, sem context switch.
+
+**Debug visual sem BIOS.** Nosso manifesto proíbe o uso de `int 0x10` em protected mode. Quando algo falha, escrevemos diretamente no VGA buffer. O handler de divisão por zero coloca "DIV0!" em vermelho no canto da tela e faz `hlt`. Bruto, rápido, honesto.
+
+**Legibilidade total.** O sistema inteiro — boot, kernel, drivers, shell — cabe em menos de 1000 linhas de código. Qualquer pessoa com conhecimento básico de C e x86 pode ler, entender e modificar o OS completo em uma sessão.
+
+**Identidade pessoal.** jOSh é um sistema operacional dedicado a um filho. Não é um produto corporativo. É uma herança técnica construída com amor e obsessão por detalhes.
+
+## 5. Roadmap: O Que Vem Depois
+
+O sistema atual é a fundação sólida. Cada próximo passo é incremental e testável:
+
+### Fase 2 — Memória (próxima)
+- **Physical Memory Manager:** Bitmap allocator para páginas de 4KB
+- **Paging:** Tabelas de página, mapeamento virtual, proteção de memória por página
+- **Heap simples:** `kmalloc` / `kfree` para alocação dinâmica no kernel
+
+### Fase 3 — Storage
+- **ATA PIO Driver:** Leitura/escrita de setores em disco via portas 0x1F0-0x1F7
+- **Mini filesystem:** FAT12 ou filesystem custom para persistência básica
+- **Comandos:** `ls`, `cat`, `write` no shell
+
+### Fase 4 — Multitasking
+- **TSS (Task State Segment)** na GDT
+- **Context switch** via timer IRQ0 (round-robin básico)
+- **Separação user/kernel** (Ring 3 / Ring 0)
+- **Syscall interface** via `int 0x80` ou entrada dedicada na IDT
+
+### Fase 5 — Rede (longo prazo)
+- **RTL8139 ou E1000 driver** para QEMU
+- **ARP + IPv4 + UDP** mínimo
+- **TCP stack** simplificada
+
+### Fase 6 — Self-hosting (visão)
+- **Port de um assembler mínimo** para compilar dentro do próprio jOSh
+- **Editor de texto nativo** no shell
+- O jOSh compilando a si mesmo
+
+Cada fase só começa quando a anterior está estável e documentada.
+
+## 6. Filosofia de Licenciamento: Além do Open Source
+
+O modelo Open Source tradicional permite uso, modificação e distribuição. Raramente exige **conexão humana**.
+
+O jOSh opera sob **Domínio Público Radical com uma Única Condição**:
+
+> **"A Música Deve Ser Ouvida."**
+
+Qualquer pessoa pode pegar o jOSh, vendê-lo, usá-lo em satélites, modificá-lo até não reconhecer, ou destruí-lo. Mas se você redistribuir o código ou fizer menção pública ao projeto, você **deve** divulgar nossa trilha sonora oficial.
+
+Isso transforma o código em uma experiência cultural. O código é livre, mas a alma do projeto é compartilhada através da arte.
+
+🎵 **[Trilha Sonora Oficial](https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA)**
+
+## 7. Chamado aos Desenvolvedores
+
+Se você está cansado de configurar build systems com 47 dependências, de escrever código que esconde o que realmente acontece, de contribuir para projetos onde seu patch leva 6 meses para ser revisado...
+
+**Venha para o jOSh.**
+
+Não queremos mantenedores. Queremos **pioneiros**. Pessoas que olham para um registrador de interrupção e veem beleza. Pessoas que entendem que `hlt` não é apenas uma instrução — é uma pausa respiratória do sistema.
+
+### Como Contribuir
+1. **Clone o Código:** [github.com/FermiHartOS/Josh](https://github.com/FermiHartOS/Josh)
+2. **Leia o Código:** Entenda a GDT, a IDT, o remap do PIC. Está tudo comentado.
+3. **Quebre e Reconstrua:** O jOSh é feito para ser modificado.
+4. **Ouça a Playlist:** É obrigatório. É parte do contrato.
+
+---
+
+## Referência Técnica Rápida
+
+```
+jOSh/
+├── boot/boot.asm          Multiboot header + GDT flush (far jump 0x08)
+├── kernel/
+│   ├── kernel.c           Boot: VGA → GDT → IDT → Shell (buffer drain)
+│   ├── gdt.c              3 entradas: Null + Code(0x9A) + Data(0x92)
+│   ├── idt.c              PIC remap (Master→0x20, Slave→0x28) + 256 gates
+│   └── idt.asm            Handlers: Timer EOI, Keyboard ISR, DivZero VGA
+├── drivers/
+│   ├── vga/vga.c          Direct write @ 0xB8000, HW cursor, scroll
+│   └── keyboard/keyboard.c Buffer circular 256B, scancodes completos
+├── user/minibash/minibash.c Shell reativo, history, 13+ comandos
+├── include/               gdt.h, idt.h, vga.h, keyboard.h, shell.h
+├── Linker.ld              Kernel @ 1MB, .text/.rodata/.data/.bss
+├── Makefile               GCC -m32 + NASM -f elf32, grub-file verify
+└── docs/MANIFESTO.md      ← Você está aqui
+```
+
+**Build & Run:**
+```bash
+make clean && make run
+# QEMU i386, Multiboot, serial on stdio
+```
+
+**Toolchain:** GCC (cross -m32) · NASM · GNU LD · QEMU · grub-file
+
+---
+
+**F E R M I  ∞  H A R T**  
+*Construindo o futuro, byte a byte.*  
+*"Este código é de domínio público. A única condição é ouvir a trilha sonora."*
 /*
  *  _______________________________________________________________________________________
  * |                                                                                       |
@@ -301,6 +623,127 @@ char keycode_to_char(uint8_t code) {
 
         default: return 0;
     }
+}
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público.
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  Divulgue a trilha sonora oficial: https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o
+ * ____________________________________________________________________________
+ */
+#include <nosound.h>
+
+/* ── Ports ─────────────────────────────────────────────── */
+#define SPEAKER_CTRL_PORT 0x61  /* Keyboard Controller (Bit 0 & 1 = Speaker Gate) */
+#define PIT_COMMAND_PORT  0x43  /* PIT Command Register */
+#define PIT_CH2_PORT      0x42  /* PIT Channel 2 Data */
+
+/* ── Helpers ───────────────────────────────────────────── */
+static inline void outb(uint16_t port, uint8_t val) {
+    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    asm volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* Delay simples baseado em loops (ajustável conforme CPU speed no QEMU) */
+ 	void nosound_delay_ms(uint32_t ms) {
+    for (uint32_t i = 0; i < ms; i++) {
+        for (volatile int j = 0; j < 50000; j++); 
+    }
+}
+
+/**
+ * @brief Habilita o gate do speaker no Port 0x61.
+ *        Bits 0 e 1 devem estar SETADOS para permitir saída do PIT Ch2.
+ */
+void speaker_init(void) {
+    uint8_t val = inb(SPEAKER_CTRL_PORT);
+    /* Força os bits 0 e 1 para 1 (Speaker Gate Open) */
+    val |= 0x03; 
+    outb(SPEAKER_CTRL_PORT, val);
+}
+
+/**
+ * @brief Configura PIT Channel 2 para a frequência desejada.
+ *        O clock interno do PIT é 1.193182 MHz.
+ */
+void speaker_set_freq(uint32_t freq) {
+    if (freq == 0) return;
+
+    uint32_t divisor = 1193182 / freq;
+
+    /* Comando: Channel 2, Lobyte/Hibyte, Mode 3 (Square Wave) */
+    outb(PIT_COMMAND_PORT, 0xB6); 
+
+    outb(PIT_CH2_PORT, (uint8_t)(divisor & 0xFF));
+    outb(PIT_CH2_PORT, (uint8_t)((divisor >> 8) & 0xFF));
+}
+
+/**
+ * @brief Liga o som (bit 0 do Port 0x61).
+ */
+void speaker_on(void) {
+    uint8_t val = inb(SPEAKER_CTRL_PORT);
+    outb(SPEAKER_CTRL_PORT, val | 0x03);
+}
+
+/**
+ * @brief Desliga o som (bit 0 do Port 0x61).
+ */
+void speaker_off(void) {
+    uint8_t val = inb(SPEAKER_CTRL_PORT);
+    outb(SPEAKER_CTRL_PORT, val & 0xFC); /* Zera bits 0 e 1 */
+}
+
+/**
+ * @brief Toca um tom contínuo (Volume Máximo - Original)
+ */
+void speaker_beep(uint32_t freq, uint32_t duration_ms) {
+    speaker_set_freq(freq);
+    speaker_on();
+    nosound_delay_ms(duration_ms);
+    speaker_off();
+}
+
+/**
+ * @brief Toca um tom "suave" usando PWM (Ligar/Desligar rápido)
+ *        Isso simula volume baixo e suaviza o som agressivo do PC Speaker.
+ * @param freq Frequência em Hz.
+ * @param duration_ms Duração total em ms.
+ */
+void speaker_beep_soft(uint32_t freq, uint32_t duration_ms) {
+    if (freq == 0 || duration_ms == 0) return;
+
+    speaker_set_freq(freq);
+    
+    // Toca em pulsos: 10ms ligado, 10ms desligado
+    // Isso cria um som "intermitente" muito mais agradável que o contínuo
+    uint32_t pulses = duration_ms / 20; 
+    
+    for (uint32_t i = 0; i < pulses; i++) {
+        speaker_on();
+        nosound_delay_ms(10);
+        speaker_off();
+        nosound_delay_ms(10);
+    }
+    speaker_off();
 }
 /*
  *  _______________________________________________________________________________________
@@ -687,6 +1130,248 @@ char keycode_to_char(uint8_t code);
 char get_key_from_buffer(void);
 
 #endif /* KEYBOARD_H */
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público para uso comercial, pessoal ou acadêmico.
+ *  Modifique, venda, destrua ou reconstrua como desejar.
+ *
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  É obrigatório divulgar a trilha sonora oficial deste OS em qualquer
+ *  redistribuição ou menção pública:
+ *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
+ * ____________________________________________________________________________
+ */
+
+#ifndef KMALLOC_H
+#define KMALLOC_H
+
+#include <stdint.h>
+
+/**
+ * @brief Inicializa o heap do kernel.
+ *        Pede páginas ao PMM e cria a free list inicial.
+ * @param initial_pages Número de páginas de 4KB para o heap inicial.
+ */
+void heap_init(uint32_t initial_pages);
+
+/**
+ * @brief Aloca 'size' bytes no heap do kernel.
+ *        First-fit com split se o bloco for grande o suficiente.
+ * @return Ponteiro para a memória alocada, ou 0 (NULL) se falhar.
+ */
+void* kmalloc(uint32_t size);
+
+/**
+ * @brief Libera memória alocada com kmalloc.
+ *        Faz merge com blocos adjacentes livres.
+ */
+void kfree(void* ptr);
+
+/* ── Estatísticas ─────────────────────────────────────────────── */
+uint32_t heap_get_total(void);
+uint32_t heap_get_used(void);
+uint32_t heap_get_free(void);
+uint32_t heap_get_alloc_count(void);
+
+#endif /* KMALLOC_H */
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público para uso comercial, pessoal ou acadêmico.
+ *  Modifique, venda, destrua ou reconstrua como desejar.
+ *
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  É obrigatório divulgar a trilha sonora oficial deste OS em qualquer
+ *  redistribuição ou menção pública:
+ *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
+ * ____________________________________________________________________________
+ */
+
+#ifndef MULTIBOOT_H
+#define MULTIBOOT_H
+
+#include <stdint.h>
+
+#define MULTIBOOT_MAGIC 0x2BADB002
+
+/**
+ * @brief Multiboot info structure (campos que nos interessam).
+ *        Passada pelo GRUB no registrador EBX.
+ *
+ *  flags bit 0 → mem_lower e mem_upper válidos
+ *  mem_lower = KB de RAM abaixo de 1MB (tipicamente 640)
+ *  mem_upper = KB de RAM acima de 1MB
+ */
+typedef struct {
+    uint32_t flags;
+    uint32_t mem_lower;    /* KB abaixo de 1MB */
+    uint32_t mem_upper;    /* KB acima de 1MB */
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    /* ... mais campos que não usamos agora */
+} __attribute__((packed)) multiboot_info_t;
+
+#endif /* MULTIBOOT_H */
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público.
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  Divulgue a trilha sonora oficial: https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o
+ * ____________________________________________________________________________
+ */
+
+#ifndef NOSOUND_H
+#define NOSOUND_H
+
+#include <stdint.h>
+
+/**
+ * @brief Inicializa o PC Speaker (habilita saída no Port 0x61).
+ *        Deve ser chamado uma vez no boot.
+ */
+void speaker_init(void);
+
+/**
+ * @brief Configura a frequência do tom (via PIT Channel 2).
+ * @param freq Frequência em Hz (ex: 440 para Lá).
+ */
+void speaker_set_freq(uint32_t freq);
+
+/**
+ * @brief Liga o alto-falante (inicia o som).
+ */
+void speaker_on(void);
+
+/**
+ * @brief Desliga o alto-falante (silêncio).
+ */
+void speaker_off(void);
+
+/**
+ * @brief Toca um beep simples.
+ * @param freq Frequência em Hz.
+ * @param duration_ms Duração em milissegundos.
+ */
+void speaker_beep(uint32_t freq, uint32_t duration_ms);
+
+/**
+ * @brief Toca um tom "suave" usando PWM (Ligar/Desligar rápido)
+ *        Isso simula volume baixo e suaviza o som agressivo do PC Speaker.
+ * @param freq Frequência em Hz.
+ * @param duration_ms Duração total em ms.
+ */
+void speaker_beep_soft(uint32_t freq, uint32_t duration_ms);
+
+/**
+ * @brief Delay simples baseado em loops para uso interno do driver de áudio.
+ *        Exposto aqui para permitir controle fino no shell (ex: pausas na música).
+ * @param ms Milissegundos a esperar.
+ */
+void nosound_delay_ms(uint32_t ms);
+
+#endif /* NOSOUND_H */
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público para uso comercial, pessoal ou acadêmico.
+ *  Modifique, venda, destrua ou reconstrua como desejar.
+ *
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  É obrigatório divulgar a trilha sonora oficial deste OS em qualquer
+ *  redistribuição ou menção pública:
+ *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
+ * ____________________________________________________________________________
+ */
+
+#ifndef PMM_H
+#define PMM_H
+
+#include <stdint.h>
+
+#define PAGE_SIZE 4096
+
+/**
+ * @brief Inicializa o Physical Memory Manager.
+ * @param total_kb   Total de KB de RAM acima de 1MB (do multiboot mem_upper).
+ * @param kernel_end Endereço do fim do kernel (símbolo _kernel_end do linker).
+ *
+ * O bitmap é colocado logo após _kernel_end.
+ * Páginas do kernel e do próprio bitmap são marcadas como usadas.
+ */
+void pmm_init(uint32_t total_kb, uint32_t kernel_end);
+
+/**
+ * @brief Aloca uma página física de 4KB.
+ * @return Endereço físico da página, ou 0 se não houver memória.
+ */
+uint32_t pmm_alloc_page(void);
+
+/**
+ * @brief Libera uma página física de 4KB.
+ * @param addr Endereço físico da página (deve ser alinhado a 4KB).
+ */
+void pmm_free_page(uint32_t addr);
+
+/* ── Estatísticas ─────────────────────────────────────────────── */
+uint32_t pmm_get_total_pages(void);
+uint32_t pmm_get_used_pages(void);
+uint32_t pmm_get_free_pages(void);
+uint32_t pmm_get_total_kb(void);
+uint32_t pmm_get_free_kb(void);
+
+#endif /* PMM_H */
 /*
  *  _______________________________________________________________________________________
  * |                                                                                       |
@@ -1256,13 +1941,13 @@ void idt_install(void) {
  */
 /**
  * @file kernel/kernel.c
- * @brief Entry point do jOSh OS — Hollywood Boot Edition
+ * @brief Entry point — Hollywood Boot + PMM + Heap
  *
- * Boot cinematográfico em 4 atos:
- *   Ato 0: Splash image (alien avatar) — impacto visual imediato
- *   Ato 1: Logo jOSh + info box com efeitos
- *   Ato 2: Boot log estilo Hollywood (subsistemas com [OK])
- *   Ato 3: Shell interativo
+ * Boot sequence:
+ *   1. Hardware init (GDT, IDT+PIC+PIT, PMM, Heap) — silencioso
+ *   2. Splash image (alien avatar)
+ *   3. Boot log cinematográfico com [OK] steps
+ *   4. Shell interativo
  */
 
 #include <stdint.h>
@@ -1271,66 +1956,50 @@ void idt_install(void) {
 #include <shell.h>
 #include <gdt.h>
 #include <idt.h>
-#include <splash.h>  /* Array splash_image[2000] gerado da foto */
+#include <multiboot.h>
+#include <pmm.h>
+#include <kmalloc.h>
+#include <splash.h>
+#include <nosound.h>
 
-/* ── Acesso direto ao VGA buffer para blit rápido ─────────── */
+
+/* Símbolo exportado pelo linker script */
+extern uint32_t _kernel_end;
+
+/* ── Acesso direto ao VGA ─────────────────────────────────────── */
 static uint16_t* const VGA_RAW = (uint16_t*)0xB8000;
 
 /* ══════════════════════════════════════════════════════════════════
- *  Utilitários internos do boot
+ *  Boot helpers
  * ══════════════════════════════════════════════════════════════════ */
-
-/**
- * @brief Blit da imagem splash direto no VGA buffer.
- *        Efeito: reveal linha por linha com delay (cortina descendo).
- */
 static void blit_splash_animated(void) {
     vga_hide_cursor();
-
     for (int y = 0; y < 25; y++) {
-        for (int x = 0; x < 80; x++) {
+        for (int x = 0; x < 80; x++)
             VGA_RAW[y * 80 + x] = splash_image[y * 80 + x];
-        }
-        vga_delay(30); /* Cortina: cada linha aparece com delay */
+        vga_delay(30);
     }
 }
 
-/**
- * @brief Overlay de texto sobre a splash (semi-transparente).
- *        Escreve texto sem apagar o fundo — usa a cor do pixel como BG.
- */
 static void splash_overlay_text(int x, int y, const char* str, uint8_t fg) {
     for (int i = 0; str[i] != '\0' && (x + i) < 80; i++) {
-        /* Pega a cor de background do pixel que já está lá */
         uint16_t existing = VGA_RAW[y * 80 + (x + i)];
-        uint8_t existing_attr = (existing >> 8) & 0xFF;
-        uint8_t existing_fg = existing_attr & 0x0F;
-
-        /* Usa a cor dominante do pixel existente como background */
+        uint8_t existing_fg = (existing >> 8) & 0x0F;
         uint8_t new_attr = (existing_fg << 4) | fg;
         VGA_RAW[y * 80 + (x + i)] = (uint16_t)str[i] | ((uint16_t)new_attr << 8);
     }
 }
 
-/**
- * @brief Progress bar animada.
- */
 static void boot_progress_bar(int row, uint8_t color) {
-    int bar_x = 20;
-    int bar_w = 40;
-
+    int bar_x = 20, bar_w = 40;
     vga_put_at(bar_x - 1, row, '[', COLOR_DARK_GREY);
     vga_put_at(bar_x + bar_w, row, ']', COLOR_DARK_GREY);
-
     for (int i = 0; i < bar_w; i++) {
         vga_put_at(bar_x + i, row, 0xDB, color);
         vga_delay(8);
     }
 }
 
-/**
- * @brief Boot step com [  OK  ] visual.
- */
 static void boot_step(const char* msg, uint8_t msg_color) {
     vga_put_string("  [", COLOR_DARK_GREY);
     vga_put_string("  OK  ", COLOR_LIGHT_GREEN);
@@ -1340,31 +2009,27 @@ static void boot_step(const char* msg, uint8_t msg_color) {
     vga_delay(80);
 }
 
-/**
- * @brief Espera qualquer tecla via IRQ1 buffer.
- */
 static void wait_any_key(void) {
-    /* Drena lixo */
     while (get_key_from_buffer() != 0) { }
-    /* Espera tecla nova */
-    while (get_key_from_buffer() == 0) {
-        asm volatile("hlt");
-    }
+    while (get_key_from_buffer() == 0) { asm volatile("hlt"); }
+}
+
+/* ── itoa local para boot log ─────────────────────────────────── */
+static void boot_itoa(uint32_t val, char* buf) {
+    char tmp[12]; int i = 0;
+    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    while (val > 0) { tmp[i++] = '0' + (val % 10); val /= 10; }
+    int j = 0; while (i > 0) buf[j++] = tmp[--i]; buf[j] = '\0';
 }
 
 /* ══════════════════════════════════════════════════════════════════
- *  ATO 0 — Splash Image (primeiro impacto visual)
+ *  ATO 0 — Splash image
  * ══════════════════════════════════════════════════════════════════ */
 static void act0_splash_image(void) {
-    /* Tela preta por um instante (tensão) */
     vga_clear_color(COLOR_BLACK);
     vga_hide_cursor();
     vga_delay(400);
-
-    /* Revela a imagem linha por linha */
     blit_splash_animated();
-
-    /* Overlay de texto sobre a imagem */
     vga_delay(300);
     splash_overlay_text(28, 1, "F E R M I  *  H A R T", COLOR_WHITE);
     splash_overlay_text(30, 22, "j O S h   O S   v1.3", COLOR_WHITE);
@@ -1372,74 +2037,61 @@ static void act0_splash_image(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
- *  ATO 1 — Logo jOSh + Info Box
+ *  ATO 1 — Logo jOSh
  * ══════════════════════════════════════════════════════════════════ */
 static void act1_logo(void) {
     vga_clear_color(COLOR_BLACK);
     vga_hide_cursor();
     vga_delay(200);
 
-    uint8_t logo_hi = COLOR_LIGHT_CYAN;
-    uint8_t logo_lo = COLOR_CYAN;
+    uint8_t hi = COLOR_LIGHT_CYAN, lo = COLOR_CYAN;
 
-    /* "j" */
+    /* j */
     int jx = 15;
-    vga_put_at(jx+4, 1, 0xFE, logo_hi);
-    vga_put_at(jx+4, 3, 0xDB, logo_hi);
-    vga_put_at(jx+4, 4, 0xDB, logo_hi);
-    vga_put_at(jx+4, 5, 0xDB, logo_hi);
-    vga_put_at(jx+4, 6, 0xDB, logo_hi);
-    vga_put_at(jx+1, 7, 0xDB, logo_lo);
-    vga_put_at(jx+2, 7, 0xDB, logo_hi);
-    vga_put_at(jx+3, 7, 0xDB, logo_hi);
-    vga_put_at(jx+4, 7, 0xDB, logo_hi);
-    vga_put_at(jx+2, 8, 0xDB, logo_lo);
-    vga_put_at(jx+3, 8, 0xDB, logo_lo);
+    vga_put_at(jx+4,1,0xFE,hi);
+    vga_put_at(jx+4,3,0xDB,hi); vga_put_at(jx+4,4,0xDB,hi);
+    vga_put_at(jx+4,5,0xDB,hi); vga_put_at(jx+4,6,0xDB,hi);
+    vga_put_at(jx+1,7,0xDB,lo); vga_put_at(jx+2,7,0xDB,hi);
+    vga_put_at(jx+3,7,0xDB,hi); vga_put_at(jx+4,7,0xDB,hi);
+    vga_put_at(jx+2,8,0xDB,lo); vga_put_at(jx+3,8,0xDB,lo);
     vga_delay(100);
 
-    /* "O" */
+    /* O */
     int ox = 25;
-    vga_put_at(ox+1, 3, 0xDB, logo_hi); vga_put_at(ox+2, 3, 0xDB, logo_hi); vga_put_at(ox+3, 3, 0xDB, logo_hi);
-    vga_put_at(ox+0, 4, 0xDB, logo_hi); vga_put_at(ox+4, 4, 0xDB, logo_hi);
-    vga_put_at(ox+0, 5, 0xDB, logo_hi); vga_put_at(ox+4, 5, 0xDB, logo_hi);
-    vga_put_at(ox+0, 6, 0xDB, logo_hi); vga_put_at(ox+4, 6, 0xDB, logo_hi);
-    vga_put_at(ox+1, 7, 0xDB, logo_lo); vga_put_at(ox+2, 7, 0xDB, logo_lo); vga_put_at(ox+3, 7, 0xDB, logo_lo);
+    vga_put_at(ox+1,3,0xDB,hi); vga_put_at(ox+2,3,0xDB,hi); vga_put_at(ox+3,3,0xDB,hi);
+    vga_put_at(ox+0,4,0xDB,hi); vga_put_at(ox+4,4,0xDB,hi);
+    vga_put_at(ox+0,5,0xDB,hi); vga_put_at(ox+4,5,0xDB,hi);
+    vga_put_at(ox+0,6,0xDB,hi); vga_put_at(ox+4,6,0xDB,hi);
+    vga_put_at(ox+1,7,0xDB,lo); vga_put_at(ox+2,7,0xDB,lo); vga_put_at(ox+3,7,0xDB,lo);
     vga_delay(100);
 
-    /* "S" */
-    int sxx = 35;
-    vga_put_at(sxx+1,3,0xDB,logo_hi); vga_put_at(sxx+2,3,0xDB,logo_hi); vga_put_at(sxx+3,3,0xDB,logo_hi); vga_put_at(sxx+4,3,0xDB,logo_hi);
-    vga_put_at(sxx+0,4,0xDB,logo_hi);
-    vga_put_at(sxx+1,5,0xDB,logo_hi); vga_put_at(sxx+2,5,0xDB,logo_hi); vga_put_at(sxx+3,5,0xDB,logo_hi);
-    vga_put_at(sxx+4,6,0xDB,logo_hi);
-    vga_put_at(sxx+0,7,0xDB,logo_lo); vga_put_at(sxx+1,7,0xDB,logo_lo); vga_put_at(sxx+2,7,0xDB,logo_lo); vga_put_at(sxx+3,7,0xDB,logo_lo);
+    /* S */
+    int sx = 35;
+    vga_put_at(sx+1,3,0xDB,hi); vga_put_at(sx+2,3,0xDB,hi); vga_put_at(sx+3,3,0xDB,hi); vga_put_at(sx+4,3,0xDB,hi);
+    vga_put_at(sx+0,4,0xDB,hi);
+    vga_put_at(sx+1,5,0xDB,hi); vga_put_at(sx+2,5,0xDB,hi); vga_put_at(sx+3,5,0xDB,hi);
+    vga_put_at(sx+4,6,0xDB,hi);
+    vga_put_at(sx+0,7,0xDB,lo); vga_put_at(sx+1,7,0xDB,lo); vga_put_at(sx+2,7,0xDB,lo); vga_put_at(sx+3,7,0xDB,lo);
     vga_delay(100);
 
-    /* "h" */
-    int hxx = 45;
-    vga_put_at(hxx+0,2,0xDB,logo_hi); vga_put_at(hxx+0,3,0xDB,logo_hi);
-    vga_put_at(hxx+0,4,0xDB,logo_hi); vga_put_at(hxx+1,4,0xDB,logo_hi); vga_put_at(hxx+2,4,0xDB,logo_hi); vga_put_at(hxx+3,4,0xDB,logo_hi);
-    vga_put_at(hxx+0,5,0xDB,logo_hi); vga_put_at(hxx+4,5,0xDB,logo_hi);
-    vga_put_at(hxx+0,6,0xDB,logo_hi); vga_put_at(hxx+4,6,0xDB,logo_hi);
-    vga_put_at(hxx+0,7,0xDB,logo_lo); vga_put_at(hxx+4,7,0xDB,logo_lo);
+    /* h */
+    int hx = 45;
+    vga_put_at(hx+0,2,0xDB,hi); vga_put_at(hx+0,3,0xDB,hi);
+    vga_put_at(hx+0,4,0xDB,hi); vga_put_at(hx+1,4,0xDB,hi); vga_put_at(hx+2,4,0xDB,hi); vga_put_at(hx+3,4,0xDB,hi);
+    vga_put_at(hx+0,5,0xDB,hi); vga_put_at(hx+4,5,0xDB,hi);
+    vga_put_at(hx+0,6,0xDB,hi); vga_put_at(hx+4,6,0xDB,hi);
+    vga_put_at(hx+0,7,0xDB,lo); vga_put_at(hx+4,7,0xDB,lo);
     vga_delay(100);
 
-    /* Infinito */
     vga_put_at(55, 5, 0xEC, COLOR_LIGHT_MAGENTA);
     vga_delay(200);
 
-    /* Autor */
     vga_put_string_at(21, 10, "F E R M I     H A R T", COLOR_DARK_GREY);
     vga_put_at(32, 10, 0xEC, COLOR_LIGHT_MAGENTA);
     vga_delay(200);
 
-    /* Separador */
-    for (int i = 10; i < 70; i++) {
-        vga_put_at(i, 11, 0xC4, COLOR_DARK_GREY);
-        vga_delay(3);
-    }
+    for (int i = 10; i < 70; i++) { vga_put_at(i, 11, 0xC4, COLOR_DARK_GREY); vga_delay(3); }
 
-    /* Info box */
     vga_draw_box(12, 13, 56, 7, COLOR_CYAN);
     vga_put_string_at(15, 14, "jOSh OS v1.3", COLOR_WHITE);
     vga_put_string_at(42, 14, "Reactive Monolithic", COLOR_DARK_GREY);
@@ -1449,10 +2101,10 @@ static void act1_logo(void) {
     vga_put_string_at(21, 16, "Flat 4GB", COLOR_LIGHT_GREEN);
     vga_put_string_at(32, 16, "IDT:", COLOR_DARK_GREY);
     vga_put_string_at(37, 16, "256 gates, PIC remapped", COLOR_LIGHT_GREEN);
-    vga_put_string_at(15, 17, "IRQs:", COLOR_DARK_GREY);
-    vga_put_string_at(21, 17, "Timer(0x20)  Keyboard(0x21)", COLOR_LIGHT_GREEN);
-    vga_put_string_at(15, 18, "VGA:", COLOR_DARK_GREY);
-    vga_put_string_at(21, 18, "80x25 Direct @ 0xB8000", COLOR_LIGHT_GREEN);
+    vga_put_string_at(15, 17, "PMM:", COLOR_DARK_GREY);
+    vga_put_string_at(21, 17, "Bitmap allocator, 4KB pages", COLOR_LIGHT_GREEN);
+    vga_put_string_at(15, 18, "Heap:", COLOR_DARK_GREY);
+    vga_put_string_at(21, 18, "kmalloc/kfree (first-fit)", COLOR_LIGHT_GREEN);
     vga_delay(300);
 
     vga_put_string_at(16, 21, "\"The code is free. The music is mandatory.\"", COLOR_DARK_GREY);
@@ -1460,13 +2112,16 @@ static void act1_logo(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
- *  ATO 2 — Boot Log (estilo Hollywood/systemd)
+ *  ATO 2 — Boot log
  * ══════════════════════════════════════════════════════════════════ */
-static void act2_boot_log(void) {
+static void act2_boot_log(uint32_t mem_upper) {
+    	/* Suprime o warning de parâmetro não utilizado (-Wunused-parameter) */
+	(void)mem_upper;
+	char buf[12];
+
     vga_clear_color(COLOR_BLACK);
     vga_hide_cursor();
 
-    /* Header bar */
     vga_fill_row(0, ' ', VGA_COLOR(COLOR_WHITE, COLOR_BLUE));
     vga_put_string_at(2, 0, " jOSh OS ", VGA_COLOR(COLOR_WHITE, COLOR_BLUE));
     vga_put_string_at(60, 0, "Boot Sequence ", VGA_COLOR(COLOR_LIGHT_CYAN, COLOR_BLUE));
@@ -1477,56 +2132,368 @@ static void act2_boot_log(void) {
     boot_step("VGA text mode initialized (80x25, 16 colors)", COLOR_LIGHT_GREY);
     boot_step("GDT loaded: Null + Code(0x08) + Data(0x10)", COLOR_LIGHT_GREY);
     boot_step("PIC 8259 remapped: Master=0x20, Slave=0x28", COLOR_LIGHT_GREY);
+    boot_step("PIT configured: 100Hz (10ms/tick)", COLOR_LIGHT_GREY);
     boot_step("IDT loaded: 256 entries, 3 active handlers", COLOR_LIGHT_GREY);
-    boot_step("IRQ0 Timer handler at vector 0x20", COLOR_LIGHT_GREY);
-    boot_step("IRQ1 Keyboard handler at vector 0x21", COLOR_LIGHT_GREY);
-    boot_step("Keyboard driver: circular buffer (256B)", COLOR_LIGHT_GREY);
-    boot_step("Exception handler: DIV0 at vector 0x00", COLOR_LIGHT_GREY);
+
+    /* PMM stats */
+    vga_put_string("  [", COLOR_DARK_GREY);
+    vga_put_string("  OK  ", COLOR_LIGHT_GREEN);
+    vga_put_string("] ", COLOR_DARK_GREY);
+    vga_put_string("PMM: ", COLOR_LIGHT_GREY);
+    boot_itoa(pmm_get_free_kb(), buf);
+    vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("KB free / ", COLOR_LIGHT_GREY);
+    boot_itoa(pmm_get_total_kb(), buf);
+    vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("KB total (", COLOR_LIGHT_GREY);
+    boot_itoa(pmm_get_free_pages(), buf);
+    vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string(" pages)\n", COLOR_LIGHT_GREY);
+    vga_delay(80);
+
+    /* Heap stats */
+    vga_put_string("  [", COLOR_DARK_GREY);
+    vga_put_string("  OK  ", COLOR_LIGHT_GREEN);
+    vga_put_string("] ", COLOR_DARK_GREY);
+    vga_put_string("Heap: ", COLOR_LIGHT_GREY);
+    boot_itoa(heap_get_total() / 1024, buf);
+    vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("KB initial (kmalloc/kfree ready)\n", COLOR_LIGHT_GREY);
+    vga_delay(80);
+
     boot_step("Interrupts enabled (STI)", COLOR_LIGHT_GREEN);
 
-    vga_set_cursor(0, 13);
+    vga_set_cursor(0, 12);
     vga_put_string("  Initializing shell...\n\n", COLOR_DARK_GREY);
-    boot_progress_bar(15, COLOR_LIGHT_CYAN);
+    boot_progress_bar(14, COLOR_LIGHT_CYAN);
     vga_delay(100);
 
-    vga_set_cursor(0, 17);
-    boot_step("MiniBash Pro shell ready", COLOR_LIGHT_GREEN);
+    vga_set_cursor(0, 16);
+    boot_step("MiniBash Pro v2 shell ready", COLOR_LIGHT_GREEN);
     boot_step("System is REACTIVE. All subsystems nominal.", COLOR_LIGHT_CYAN);
     vga_delay(300);
 
-    vga_put_string_at(23, 21, "Press any key to enter shell...", COLOR_YELLOW);
+    vga_put_string_at(23, 20, "Press any key to enter shell...", COLOR_YELLOW);
 }
 
 /* ══════════════════════════════════════════════════════════════════
- *  kernel_main() — The Hollywood Boot
- *
- *  Hardware init é silencioso (GDT + IDT acontecem antes de
- *  qualquer visual). O usuário só vê arte e resultados.
+ *  kernel_main() — recebe multiboot magic e info pointer
  * ══════════════════════════════════════════════════════════════════ */
-void kernel_main(void) {
+void kernel_main(uint32_t mb_magic, multiboot_info_t* mb_info) {
 
     /* ── Hardware init (silencioso) ─────────────────────────── */
     vga_init();
+    speaker_init();
     gdt_install();
-    idt_install();
+    idt_install(); /* PIC remap + PIT @ 100Hz + IDT load + STI */
 
-    /* ── ATO 0: Splash com avatar ──────────────────────────── */
+    /* ── Memory init ───────────────────────────────────────── */
+    uint32_t mem_upper = 0;
+
+    if (mb_magic == MULTIBOOT_MAGIC && (mb_info->flags & 1)) {
+        mem_upper = mb_info->mem_upper; /* KB acima de 1MB */
+    } else {
+        mem_upper = 32 * 1024; /* Fallback: assume 32MB acima de 1MB */
+    }
+
+    pmm_init(mem_upper, (uint32_t)&_kernel_end);
+    heap_init(16); /* 16 páginas = 64KB heap inicial */
+
+    /* ── ATO 0: Splash ─────────────────────────────────────── */
     act0_splash_image();
     wait_any_key();
 
-    /* ── ATO 1: Logo jOSh + specs ──────────────────────────── */
+    /* ── ATO 1: Logo ───────────────────────────────────────── */
     act1_logo();
     wait_any_key();
 
-    /* ── ATO 2: Boot log cinematográfico ───────────────────── */
-    act2_boot_log();
+    /* ── ATO 2: Boot log ───────────────────────────────────── */
+    act2_boot_log(mem_upper);
     wait_any_key();
 
     /* ── ATO 3: Shell ──────────────────────────────────────── */
-    while (get_key_from_buffer() != 0) { /* drena */ }
+    while (get_key_from_buffer() != 0) { }
     vga_show_cursor();
     start_shell();
 }
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público para uso comercial, pessoal ou acadêmico.
+ *  Modifique, venda, destrua ou reconstrua como desejar.
+ *
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  É obrigatório divulgar a trilha sonora oficial deste OS em qualquer
+ *  redistribuição ou menção pública:
+ *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
+ * ____________________________________________________________________________
+ */
+/**
+ * @file kernel/kmalloc.c
+ * @brief Kernel Heap Allocator — First-fit linked list
+ *
+ * Cada bloco tem um header de 12 bytes:
+ *   - size:  tamanho dos dados (sem o header)
+ *   - free:  1 = livre, 0 = alocado
+ *   - next:  ponteiro para o próximo bloco
+ *
+ * Operações:
+ *   kmalloc: first-fit search, split se sobra >= 16 bytes
+ *   kfree:   marca como livre, merge com vizinhos adjacentes
+ */
+
+#include <kmalloc.h>
+#include <pmm.h>
+
+/* ── Block header ─────────────────────────────────────────────── */
+typedef struct block_header {
+    uint32_t size;              /* Tamanho dos DADOS (sem header) */
+    uint32_t free;              /* 1 = livre, 0 = alocado */
+    struct block_header* next;  /* Próximo bloco na lista */
+} block_header_t;
+
+#define HEADER_SIZE sizeof(block_header_t)
+#define MIN_SPLIT   16  /* Mínimo de dados para justificar split */
+
+/* ── Estado do heap ───────────────────────────────────────────── */
+static block_header_t* heap_start = 0;
+static uint32_t heap_total   = 0;
+static uint32_t heap_used    = 0;
+static uint32_t alloc_count  = 0;
+
+/* ══════════════════════════════════════════════════════════════════
+ *  heap_init() — Pede páginas ao PMM e cria o bloco inicial
+ * ══════════════════════════════════════════════════════════════════ */
+void heap_init(uint32_t initial_pages) {
+    /* Aloca páginas contíguas do PMM */
+    uint32_t first_page = pmm_alloc_page();
+    if (first_page == 0) return; /* Sem memória */
+
+    for (uint32_t i = 1; i < initial_pages; i++) {
+        pmm_alloc_page(); /* Assume contiguidade (sem paging, é linear) */
+    }
+
+    heap_total = initial_pages * PAGE_SIZE;
+
+    /* Cria um único bloco livre cobrindo todo o heap */
+    heap_start = (block_header_t*)first_page;
+    heap_start->size = heap_total - HEADER_SIZE;
+    heap_start->free = 1;
+    heap_start->next = 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  kmalloc() — First-fit allocation
+ * ══════════════════════════════════════════════════════════════════ */
+void* kmalloc(uint32_t size) {
+    if (size == 0) return 0;
+
+    /* Alinha a 4 bytes */
+    size = (size + 3) & ~3;
+
+    block_header_t* cur = heap_start;
+
+    while (cur) {
+        if (cur->free && cur->size >= size) {
+            /* Split se sobra espaço suficiente para novo bloco */
+            if (cur->size >= size + HEADER_SIZE + MIN_SPLIT) {
+                block_header_t* new_block = (block_header_t*)((uint8_t*)cur + HEADER_SIZE + size);
+                new_block->size = cur->size - size - HEADER_SIZE;
+                new_block->free = 1;
+                new_block->next = cur->next;
+
+                cur->size = size;
+                cur->next = new_block;
+            }
+
+            cur->free = 0;
+            heap_used += cur->size;
+            alloc_count++;
+
+            /* Retorna ponteiro APÓS o header */
+            return (void*)((uint8_t*)cur + HEADER_SIZE);
+        }
+        cur = cur->next;
+    }
+
+    return 0; /* Sem memória */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  kfree() — Libera e faz merge com vizinhos
+ * ══════════════════════════════════════════════════════════════════ */
+void kfree(void* ptr) {
+    if (!ptr) return;
+
+    block_header_t* block = (block_header_t*)((uint8_t*)ptr - HEADER_SIZE);
+    block->free = 1;
+    heap_used -= block->size;
+    alloc_count--;
+
+    /* Merge com o próximo se também estiver livre */
+    if (block->next && block->next->free) {
+        block->size += HEADER_SIZE + block->next->size;
+        block->next = block->next->next;
+    }
+
+    /* Merge com o anterior (scan linear desde o início) */
+    block_header_t* cur = heap_start;
+    while (cur && cur->next) {
+        if (cur->free && cur->next->free) {
+            cur->size += HEADER_SIZE + cur->next->size;
+            cur->next = cur->next->next;
+        }
+        cur = cur->next;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Estatísticas
+ * ══════════════════════════════════════════════════════════════════ */
+uint32_t heap_get_total(void)       { return heap_total; }
+uint32_t heap_get_used(void)        { return heap_used; }
+uint32_t heap_get_free(void)        { return heap_total - heap_used - HEADER_SIZE; }
+uint32_t heap_get_alloc_count(void) { return alloc_count; }
+/*
+ *  _______________________________________________________________________________________
+ * |                                                                                       |
+ * |   ███████╗███████╗██████╗ ███╗   ███╗██╗     ∞     ██╗  ██╗ █████╗ ██████╗████████╗   |
+ * |   ██╔════╝██╔════╝██╔══██╗████╗ ████║██║           ██║  ██║██╔══██╗██╔══██╗╚══██╔══╝  |
+ * |   █████╗  █████╗  ██████╔╝██╔████╔██║██║           ███████║███████║██████╔╝   ██║     |
+ * |   ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║           ██╔══██║██╔══██║██╔══██╗   ██║     |
+ * |   ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║           ██║  ██║██║  ██║██║  ██║   ██║     |
+ * |   ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝           ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝     |
+ * |_______________________________________________________________________________________|
+ *
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ *
+ *  [ LIBERDADE TOTAL - LICENÇA ALÉM DO OPEN SOURCE ]
+ *  Este código é de domínio público para uso comercial, pessoal ou acadêmico.
+ *  Modifique, venda, destrua ou reconstrua como desejar.
+ *
+ *  [ ÚNICA RESTRIÇÃO ]
+ *  É obrigatório divulgar a trilha sonora oficial deste OS em qualquer
+ *  redistribuição ou menção pública:
+ *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
+ * ____________________________________________________________________________
+ */
+/**
+ * @file kernel/pmm.c
+ * @brief Physical Memory Manager — Bitmap Allocator
+ *
+ * Gerencia páginas físicas de 4KB usando um bitmap.
+ * Cada bit = 1 página: 0 = livre, 1 = usada.
+ *
+ * Layout na memória:
+ *   0x000000 - 0x0FFFFF : Reservado (BIOS, VGA, ROM) — marcado como usado
+ *   0x100000 - _kernel_end : Kernel code/data/bss — marcado como usado
+ *   _kernel_end - bitmap_end : O próprio bitmap — marcado como usado
+ *   bitmap_end - RAM_TOP : Memória livre disponível para alocação
+ *
+ * O QEMU com -m 128 dá ~128MB = ~32768 páginas = bitmap de 4KB.
+ */
+
+#include <pmm.h>
+
+/* ── Estado ───────────────────────────────────────────────────── */
+static uint8_t* bitmap     = 0;      /* Ponteiro para o bitmap     */
+static uint32_t total_pages = 0;     /* Total de páginas gerenciadas */
+static uint32_t used_pages  = 0;     /* Páginas marcadas como usadas */
+static uint32_t bitmap_size = 0;     /* Tamanho do bitmap em bytes  */
+
+/* ── Helpers de bitmap ────────────────────────────────────────── */
+static inline void bitmap_set(uint32_t page) {
+    bitmap[page / 8] |= (1 << (page % 8));
+}
+
+static inline void bitmap_clear(uint32_t page) {
+    bitmap[page / 8] &= ~(1 << (page % 8));
+}
+
+static inline int bitmap_test(uint32_t page) {
+    return (bitmap[page / 8] >> (page % 8)) & 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  pmm_init()
+ *
+ *  @param total_kb    KB de RAM acima de 1MB (multiboot mem_upper)
+ *  @param kernel_end  Endereço de _kernel_end (do linker)
+ * ══════════════════════════════════════════════════════════════════ */
+void pmm_init(uint32_t total_kb, uint32_t kernel_end) {
+    /* RAM total = 1MB (baixa) + mem_upper KB */
+    uint32_t total_ram = (1024 + total_kb) * 1024; /* em bytes */
+
+    total_pages = total_ram / PAGE_SIZE;
+    bitmap_size = (total_pages + 7) / 8; /* bytes necessários */
+
+    /* Bitmap fica logo após o kernel, alinhado a 4 bytes */
+    bitmap = (uint8_t*)((kernel_end + 3) & ~3);
+
+    /* Marca TUDO como usado inicialmente (safe default) */
+    for (uint32_t i = 0; i < bitmap_size; i++)
+        bitmap[i] = 0xFF;
+    used_pages = total_pages;
+
+    /* Libera páginas acima do bitmap até o topo da RAM */
+    uint32_t bitmap_end = (uint32_t)bitmap + bitmap_size;
+    bitmap_end = (bitmap_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); /* Alinha */
+
+    uint32_t first_free_page = bitmap_end / PAGE_SIZE;
+    uint32_t last_page = total_pages;
+
+    for (uint32_t p = first_free_page; p < last_page; p++) {
+        bitmap_clear(p);
+        used_pages--;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  pmm_alloc_page() — First-fit no bitmap
+ * ══════════════════════════════════════════════════════════════════ */
+uint32_t pmm_alloc_page(void) {
+    for (uint32_t i = 0; i < total_pages; i++) {
+        if (!bitmap_test(i)) {
+            bitmap_set(i);
+            used_pages++;
+            return i * PAGE_SIZE;
+        }
+    }
+    return 0; /* Sem memória */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  pmm_free_page()
+ * ══════════════════════════════════════════════════════════════════ */
+void pmm_free_page(uint32_t addr) {
+    uint32_t page = addr / PAGE_SIZE;
+    if (page < total_pages && bitmap_test(page)) {
+        bitmap_clear(page);
+        used_pages--;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Estatísticas
+ * ══════════════════════════════════════════════════════════════════ */
+uint32_t pmm_get_total_pages(void) { return total_pages; }
+uint32_t pmm_get_used_pages(void)  { return used_pages; }
+uint32_t pmm_get_free_pages(void)  { return total_pages - used_pages; }
+uint32_t pmm_get_total_kb(void)    { return total_pages * 4; }
+uint32_t pmm_get_free_kb(void)     { return (total_pages - used_pages) * 4; }
 /*
  *  _______________________________________________________________________________________
  * |                                                                                       |
@@ -1668,6 +2635,7 @@ void timer_get_clock(uint32_t* hours, uint32_t* minutes, uint32_t* secs) {
 #include <keyboard.h>
 #include <timer.h>
 #include <stdint.h>
+#include <nosound.h>
 
 /* ── Identidade do sistema (uname fields) ─────────────────────── */
 #define OS_SYSNAME    "jOSh"
@@ -1743,11 +2711,6 @@ static void itoa_hex(uint32_t val, char* buf) {
 
 /* ══════════════════════════════════════════════════════════════════
  *  Status bar (linha 23 = separador, linha 24 = info)
- *
- *  Estilo minimalista, fundo preto, cores cyan/dark grey.
- *
- *  Linha 23: ────────────────────────────────── (thin line)
- *  Linha 24:  00:12:45 │ Up 0h12m45s │ Cmds:42 │ Ticks:12300 │ jOSh
  * ══════════════════════════════════════════════════════════════════ */
 static void draw_status_bar(void) {
     char buf[12];
@@ -1971,7 +2934,9 @@ static void cmd_help(void) {
 
     vga_put_string("  about", COLOR_LIGHT_CYAN);
     vga_put_string("   about jOSh\n\n", COLOR_DARK_GREY);
-
+    
+    // Atualização da lista de comandos de áudio
+    vga_put_string("  beep <hz> <ms>, play <name>, starwars\n", COLOR_YELLOW);
     vga_put_string("  UP/DOWN arrows to navigate command history.\n", COLOR_DARK_GREY);
 }
 
@@ -2122,6 +3087,103 @@ static void cmd_reboot(void) {
     asm volatile("cli; hlt");
 }
 
+/* ── Comandos de Áudio ─────────────────────────────────────────── */
+static void cmd_beep(const char* args) {
+    char buf[12]; 
+    
+    const char* p = args + 5; /* Pula "beep " */
+    while (*p == ' ') p++;
+    
+    uint32_t freq = 0, dur = 0;
+    
+    /* Parse Freq */
+    while (*p >= '0' && *p <= '9') {
+        freq = freq * 10 + (*p - '0');
+        p++;
+    }
+    while (*p == ' ') p++;
+    
+    /* Parse Duracao */
+    while (*p >= '0' && *p <= '9') {
+        dur = dur * 10 + (*p - '0');
+        p++;
+    }
+
+    if (freq == 0 || dur == 0) {
+        vga_put_string("  Uso: beep <freq_hz> <dur_ms>\n", COLOR_LIGHT_RED);
+        vga_put_string("  Ex: beep 440 1000\n", COLOR_DARK_GREY);
+        return;
+    }
+
+    vga_put_string("  Toccando ", COLOR_WHITE);
+    itoa(freq, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("Hz por ", COLOR_WHITE);
+    itoa(dur, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("ms...\n", COLOR_WHITE);
+
+    speaker_beep(freq, dur);
+}
+
+static void cmd_play(const char* args) {
+    const char* name = args + 5;
+    while (*name == ' ') name++;
+
+    if (str_compare(name, "tetris") == 0) {
+        vga_put_string("  Playing Tetris Theme...\n", COLOR_YELLOW);
+        speaker_beep(659, 100); speaker_beep(659, 100); speaker_beep(659, 100);
+        speaker_beep(523, 100); speaker_beep(523, 100); speaker_beep(523, 100);
+        speaker_beep(493, 100); speaker_beep(493, 100); speaker_beep(493, 100);
+        speaker_beep(587, 100); speaker_beep(587, 100); speaker_beep(587, 100);
+        speaker_beep(659, 100); speaker_beep(659, 100); speaker_beep(659, 100);
+        speaker_beep(698, 200);
+        vga_put_string("  Done!\n", COLOR_GREEN);
+    }
+    else if (str_compare(name, "startup") == 0) {
+        vga_put_string("  Power On Sound...\n", COLOR_CYAN);
+        speaker_beep(220, 200);
+        speaker_beep(330, 200);
+        speaker_beep(440, 400);
+        vga_put_string("  Ready.\n", COLOR_GREEN);
+    }
+    else {
+        vga_put_string("  Unknown melody. Try: tetris, startup\n", COLOR_LIGHT_RED);
+    }
+}
+
+// NOVO COMANDO: Star Wars (Modo Suave)
+static void cmd_starwars(void) {
+    vga_put_string("  Playing Imperial March (Soft Mode)...\n", COLOR_YELLOW);
+    
+    // Notas da Marcha Imperial (Frequências aproximadas)
+    // Usando frequências redondas próximas para simplicidade no PIT
+    
+    // Parte 1
+    speaker_beep_soft(165, 150); speaker_beep_soft(165, 150); speaker_beep_soft(165, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(208, 150); speaker_beep_soft(208, 150); speaker_beep_soft(208, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(262, 150); speaker_beep_soft(262, 150); speaker_beep_soft(262, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(247, 150); speaker_beep_soft(247, 150); speaker_beep_soft(247, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(220, 150); speaker_beep_soft(220, 150); speaker_beep_soft(208, 300);
+    
+    nosound_delay_ms(200);
+    
+    // Parte 2 (Variação)
+    speaker_beep_soft(262, 150); speaker_beep_soft(262, 150); speaker_beep_soft(262, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(294, 150); speaker_beep_soft(294, 150); speaker_beep_soft(294, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(330, 150); speaker_beep_soft(330, 150); speaker_beep_soft(330, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(370, 150); speaker_beep_soft(370, 150); speaker_beep_soft(370, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(330, 150); speaker_beep_soft(330, 150); speaker_beep_soft(294, 300);
+
+    vga_put_string("  Done!\n", COLOR_GREEN);
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  Command Dispatcher
  * ══════════════════════════════════════════════════════════════════ */
@@ -2138,6 +3200,9 @@ static void execute_command(void) {
     else if (str_compare(cmd_buffer, "clear") == 0) { vga_clear(); draw_status_bar(); }
     else if (str_compare(cmd_buffer, "fetch") == 0) cmd_fetch();
     else if (str_starts_with(cmd_buffer, "uname")) cmd_uname(cmd_buffer);
+    else if (str_starts_with(cmd_buffer, "beep")) cmd_beep(cmd_buffer);
+    else if (str_starts_with(cmd_buffer, "play")) cmd_play(cmd_buffer);
+    else if (str_compare(cmd_buffer, "starwars") == 0) cmd_starwars(); // NOVO
     else if (str_compare(cmd_buffer, "whoami") == 0) {
         vga_put_string("  ", COLOR_WHITE); vga_put_string(SHELL_USER, COLOR_LIGHT_GREEN);
         vga_put_char('\n', COLOR_WHITE);

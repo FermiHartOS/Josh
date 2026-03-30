@@ -1,1 +1,2 @@
 find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.asm" -o -name "*.ld" -o -name "Makefile" \) | sort | xargs cat > josh_full_source.txt
+tar -czvf Latest-Full-jOSh_$(date +%Y%m%d_%H%M%S).tar.gz jOSh/

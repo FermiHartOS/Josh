@@ -22,155 +22,778 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
+/**
+ * @file user/minibash/minibash.c
+ * @brief MiniBash Pro v2 — Shell Reativo do jOSh OS
+ *
+ * Layout da tela (80x25):
+ *   Linhas 0-22:  área de conteúdo (scroll protegido)
+ *   Linha 23:     separador fino (thin line CP437)
+ *   Linha 24:     status bar minimalista (fundo preto, cores cyan)
+ */
+
 #include <shell.h>
 #include <vga.h>
 #include <keyboard.h>
+#include <timer.h>
+#include <stdint.h>
+#include <nosound.h>
 
-#define MAX_CMD_LEN 128
-#define HISTORY_SIZE 10
+/* ── Identidade do sistema (uname fields) ─────────────────────── */
+#define OS_SYSNAME    "jOSh"
+#define OS_NODENAME   "fermihart"
+#define OS_RELEASE    "1.3.0-reactive"
+#define OS_VERSION    "#1 Mon Mar 30 2026"
+#define OS_MACHINE    "i686"
+#define OS_PROCESSOR  "x86_32"
+#define OS_PLATFORM   "bare-metal"
 
+#define SHELL_USER    "fermi"
+#define SHELL_CWD     "/"
+
+/* ── Shell config ─────────────────────────────────────────────── */
+#define MAX_CMD_LEN   128
+#define HISTORY_SIZE  16
+
+/* ── Estado ───────────────────────────────────────────────────── */
 static char cmd_buffer[MAX_CMD_LEN];
-static int cmd_idx = 0;
+static int  cmd_idx = 0;
 
-// Histórico de comandos
 static char history[HISTORY_SIZE][MAX_CMD_LEN];
-static int history_idx = 0;
-static int current_history_pos = -1;
+static int  history_count  = 0;
+static int  history_write  = 0;
+static int  history_browse = -1;
 
-int str_compare(const char* s1, const char* s2) {
+static uint32_t cmd_count = 0;
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Tabela de comandos — usada pelo Tab Completion e Help dinâmico
+ * ══════════════════════════════════════════════════════════════════ */
+static const char* const cmd_table[] = {
+    "about",
+    "beep",
+    "clear",
+    "colors",
+    "date",
+    "echo",
+    "env",
+    "fetch",
+    "halt",
+    "help",
+    "history",
+    "hostname",
+    "mem",
+    "panic",
+    "play",
+    "reboot",
+    "starwars",
+    "uname",
+    "uptime",
+    "ver",
+    "whoami",
+};
+#define CMD_TABLE_SIZE (sizeof(cmd_table) / sizeof(cmd_table[0]))
+
+/* ══════════════════════════════════════════════════════════════════
+ *  String utilities
+ * ══════════════════════════════════════════════════════════════════ */
+static int str_compare(const char* s1, const char* s2) {
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }
-    return *(unsigned char*)s1 - *(unsigned char*)s2;
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
-void str_copy(char* dest, const char* src) {
-    int i = 0;
-    while (src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
+static int str_starts_with(const char* str, const char* prefix) {
+    while (*prefix) {
+        if (*str != *prefix) return 0;
+        str++; prefix++;
     }
-    dest[i] = '\0';
+    return 1;
 }
 
-void print_prompt() {
-    vga_put_string("\nFermi@root: ", COLOR_LIGHT_CYAN);
+static int str_len(const char* s) {
+    int n = 0; while (s[n]) n++; return n;
 }
 
-void save_to_history(const char* cmd) {
+static void str_copy(char* dest, const char* src) {
+    int i = 0; while (src[i]) { dest[i] = src[i]; i++; } dest[i] = '\0';
+}
+
+static void itoa(uint32_t val, char* buf) {
+    char tmp[12]; int i = 0;
+    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    while (val > 0) { tmp[i++] = '0' + (val % 10); val /= 10; }
+    int j = 0; while (i > 0) buf[j++] = tmp[--i]; buf[j] = '\0';
+}
+
+static void itoa_pad2(uint32_t val, char* buf) {
+    buf[0] = '0' + (val / 10) % 10;
+    buf[1] = '0' + val % 10;
+    buf[2] = '\0';
+}
+
+static void itoa_hex(uint32_t val, char* buf) {
+    const char hex[] = "0123456789ABCDEF";
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 7; i >= 0; i--)
+        buf[2 + (7 - i)] = hex[(val >> (i * 4)) & 0xF];
+    buf[10] = '\0';
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Status bar (linha 23 = separador, linha 24 = info)
+ * ══════════════════════════════════════════════════════════════════ */
+static void draw_status_bar(void) {
+    char buf[12];
+
+    /* Linha 23: separador fino */
+    for (int x = 0; x < 80; x++)
+        vga_put_at(x, 23, 0xC4, COLOR_DARK_GREY); /* ─ thin horizontal */
+
+    /* Linha 24: limpa com fundo preto */
+    vga_fill_row(24, ' ', COLOR_DARK_GREY);
+
+    int pos = 1;
+
+    /* Relógio */
+    uint32_t h, m, s;
+    timer_get_clock(&h, &m, &s);
+    itoa_pad2(h, buf);
+    vga_put_string_at(pos, 24, buf, COLOR_LIGHT_CYAN); pos += 2;
+    vga_put_at(pos, 24, ':', COLOR_DARK_GREY); pos += 1;
+    itoa_pad2(m, buf);
+    vga_put_string_at(pos, 24, buf, COLOR_LIGHT_CYAN); pos += 2;
+    vga_put_at(pos, 24, ':', COLOR_DARK_GREY); pos += 1;
+    itoa_pad2(s, buf);
+    vga_put_string_at(pos, 24, buf, COLOR_LIGHT_CYAN); pos += 2;
+
+    /* Separador */
+    pos += 1;
+    vga_put_at(pos, 24, 0xB3, COLOR_DARK_GREY); pos += 2; /* │ */
+
+    /* Uptime compacto */
+    vga_put_string_at(pos, 24, "Up ", COLOR_DARK_GREY); pos += 3;
+    itoa(timer_get_uptime_hours(), buf);
+    vga_put_string_at(pos, 24, buf, COLOR_CYAN);
+    pos += str_len(buf);
+    vga_put_at(pos, 24, 'h', COLOR_DARK_GREY); pos += 1;
+    itoa_pad2(timer_get_uptime_minutes(), buf);
+    vga_put_string_at(pos, 24, buf, COLOR_CYAN); pos += 2;
+    vga_put_at(pos, 24, 'm', COLOR_DARK_GREY); pos += 1;
+    itoa_pad2(timer_get_uptime_seconds(), buf);
+    vga_put_string_at(pos, 24, buf, COLOR_CYAN); pos += 2;
+    vga_put_at(pos, 24, 's', COLOR_DARK_GREY); pos += 1;
+
+    /* Separador */
+    pos += 1;
+    vga_put_at(pos, 24, 0xB3, COLOR_DARK_GREY); pos += 2;
+
+    /* Cmds */
+    vga_put_string_at(pos, 24, "Cmds:", COLOR_DARK_GREY); pos += 5;
+    itoa(cmd_count, buf);
+    vga_put_string_at(pos, 24, buf, COLOR_CYAN); pos += str_len(buf);
+
+    /* Separador */
+    pos += 1;
+    vga_put_at(pos, 24, 0xB3, COLOR_DARK_GREY); pos += 2;
+
+    /* PID (preparado para multitask — por enquanto sempre 0) */
+    vga_put_string_at(pos, 24, "PID:", COLOR_DARK_GREY); pos += 4;
+    vga_put_string_at(pos, 24, "0", COLOR_CYAN); pos += 1;
+
+    /* Branding no canto direito */
+    vga_put_string_at(74, 24, "jOSh", COLOR_LIGHT_CYAN);
+    vga_put_at(78, 24, 0xEC, COLOR_LIGHT_MAGENTA); /* ∞ */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Prompt: fermi@fermihart:/∞ 
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Macro para imprimir o prompt — usado em print_prompt e tab_complete */
+#define PRINT_PROMPT_INLINE() do { \
+    vga_put_string(SHELL_USER, COLOR_LIGHT_GREEN); \
+    vga_put_char('@', COLOR_DARK_GREY); \
+    vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN); \
+    vga_put_char(':', COLOR_DARK_GREY); \
+    vga_put_string(SHELL_CWD, COLOR_LIGHT_BLUE); \
+    vga_put_char((char)0xEC, COLOR_LIGHT_MAGENTA); \
+    vga_put_char(' ', COLOR_WHITE); \
+} while(0)
+
+static void print_prompt(void) {
+    draw_status_bar();
+    vga_put_char('\n', COLOR_WHITE);
+    PRINT_PROMPT_INLINE();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Line editing + History
+ * ══════════════════════════════════════════════════════════════════ */
+static void erase_input_line(void) {
+    while (cmd_idx > 0) { vga_put_char('\b', COLOR_WHITE); cmd_idx--; }
+}
+
+static void replace_line(const char* new_text) {
+    erase_input_line();
+    str_copy(cmd_buffer, new_text);
+    cmd_idx = str_len(cmd_buffer);
+    vga_put_string(cmd_buffer, COLOR_WHITE);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Tab Completion
+ *
+ *  Comportamento:
+ *    - Se cmd_buffer está vazio: lista todos os comandos
+ *    - Se há exatamente 1 match: completa + adiciona espaço
+ *    - Se há múltiplos matches: mostra todos, mantém o que já digitou
+ *    - Se não há match: não faz nada
+ * ══════════════════════════════════════════════════════════════════ */
+static void tab_complete(void) {
+    cmd_buffer[cmd_idx] = '\0';
+
+    /* Conta matches */
+    int match_count = 0;
+    int last_match  = -1;
+
+    for (int i = 0; i < (int)CMD_TABLE_SIZE; i++) {
+        if (cmd_idx == 0 || str_starts_with(cmd_table[i], cmd_buffer)) {
+            match_count++;
+            last_match = i;
+        }
+    }
+
+    if (match_count == 0) {
+        /* Nenhum match — não faz nada */
+        return;
+    }
+
+    if (match_count == 1) {
+        /* Match único — completa o comando e adiciona espaço */
+        replace_line(cmd_table[last_match]);
+        /* Adiciona espaço se o comando aceita argumentos */
+        if (cmd_idx < MAX_CMD_LEN - 2) {
+            cmd_buffer[cmd_idx++] = ' ';
+            cmd_buffer[cmd_idx] = '\0';
+            vga_put_char(' ', COLOR_WHITE);
+        }
+        return;
+    }
+
+    /* Múltiplos matches — mostra todos abaixo e mantém a linha */
+    vga_put_char('\n', COLOR_WHITE);
+    vga_put_string("  ", COLOR_WHITE);
+
+    int col = 0;
+    for (int i = 0; i < (int)CMD_TABLE_SIZE; i++) {
+        if (cmd_idx == 0 || str_starts_with(cmd_table[i], cmd_buffer)) {
+            vga_put_string(cmd_table[i], COLOR_LIGHT_CYAN);
+            vga_put_string("  ", COLOR_WHITE);
+            col++;
+            /* Quebra linha a cada 6 comandos para não ultrapassar 80 cols */
+            if (col % 6 == 0) {
+                vga_put_string("\n  ", COLOR_WHITE);
+            }
+        }
+    }
+    vga_put_char('\n', COLOR_WHITE);
+
+    /* Reimprimi o prompt com o que já foi digitado */
+    PRINT_PROMPT_INLINE();
+    vga_put_string(cmd_buffer, COLOR_WHITE);
+}
+
+static void save_to_history(const char* cmd) {
     if (cmd[0] == '\0') return;
-    if (history_idx > 0) {
-        int last = (history_idx - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    if (history_count > 0) {
+        int last = (history_write - 1 + HISTORY_SIZE) % HISTORY_SIZE;
         if (str_compare(history[last], cmd) == 0) return;
     }
-    str_copy(history[history_idx], cmd);
-    history_idx = (history_idx + 1) % HISTORY_SIZE;
-    current_history_pos = history_idx;
+    str_copy(history[history_write], cmd);
+    history_write = (history_write + 1) % HISTORY_SIZE;
+    if (history_count < HISTORY_SIZE) history_count++;
 }
 
-void cmd_fetch() {
-    vga_put_string("\n  ######   Fermi Hart OS v1.2", COLOR_LIGHT_CYAN);
-    vga_put_string("\n  ######   Kernel: x86_32 Monolithic", COLOR_WHITE);
-    vga_put_string("\n  ######   Shell: MiniBash Pro (Reactive)", COLOR_WHITE);
-    vga_put_string("\n  ######   Uptime: Just booted", COLOR_WHITE);
-    vga_put_char('\n', COLOR_WHITE);
-}
-
-void execute_command() {
-    cmd_buffer[cmd_idx] = '\0';
-    save_to_history(cmd_buffer);
-    current_history_pos = -1;
-
-    vga_put_char('\n', COLOR_WHITE);
-
-    if (str_compare(cmd_buffer, "help") == 0) {
-        vga_put_string("COMMANDS: help, clear, fetch, ver, panic, halt, up, down", COLOR_YELLOW);
-    } 
-    else if (str_compare(cmd_buffer, "clear") == 0) {
-        vga_clear();
-    } 
-    else if (str_compare(cmd_buffer, "fetch") == 0) {
-        cmd_fetch();
+static void history_up(void) {
+    if (history_count == 0) return;
+    if (history_browse == -1) {
+        history_browse = (history_write - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    } else {
+        int prev = (history_browse - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+        int oldest = (history_count < HISTORY_SIZE) ? 0 : history_write;
+        if (prev == oldest && history_count == HISTORY_SIZE) return;
+        if (history_browse == oldest) return;
+        history_browse = prev;
     }
+    replace_line(history[history_browse]);
+}
+
+static void history_down(void) {
+    if (history_browse == -1) return;
+    int most_recent = (history_write - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    if (history_browse == most_recent) {
+        history_browse = -1; erase_input_line(); cmd_buffer[0] = '\0'; return;
+    }
+    history_browse = (history_browse + 1) % HISTORY_SIZE;
+    replace_line(history[history_browse]);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Commands
+ * ══════════════════════════════════════════════════════════════════ */
+static void cmd_uname(const char* args) {
+    int show_all = 0, show_s = 0, show_n = 0, show_r = 0;
+    int show_v = 0, show_m = 0, show_p = 0, show_i = 0;
+
+    if (str_compare(args, "uname") == 0) { show_s = 1; }
+    else if (str_starts_with(args, "uname ")) {
+        const char* f = args + 6;
+        while (*f) {
+            if (*f == '-') { f++; continue; }
+            if (*f == 'a') show_all = 1;
+            if (*f == 's') show_s = 1;
+            if (*f == 'n') show_n = 1;
+            if (*f == 'r') show_r = 1;
+            if (*f == 'v') show_v = 1;
+            if (*f == 'm') show_m = 1;
+            if (*f == 'p') show_p = 1;
+            if (*f == 'i') show_i = 1;
+            f++;
+        }
+    }
+
+    if (show_all) {
+        vga_put_string("  ", COLOR_WHITE);
+        vga_put_string(OS_SYSNAME, COLOR_LIGHT_CYAN);    vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN);   vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_RELEASE, COLOR_WHITE);           vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_VERSION, COLOR_DARK_GREY);       vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_MACHINE, COLOR_YELLOW);          vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_PROCESSOR, COLOR_YELLOW);        vga_put_char(' ', COLOR_WHITE);
+        vga_put_string(OS_PLATFORM, COLOR_DARK_GREY);
+        vga_put_char('\n', COLOR_WHITE);
+        return;
+    }
+    vga_put_string("  ", COLOR_WHITE);
+    if (show_s) { vga_put_string(OS_SYSNAME, COLOR_LIGHT_CYAN);  vga_put_char(' ', COLOR_WHITE); }
+    if (show_n) { vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN); vga_put_char(' ', COLOR_WHITE); }
+    if (show_r) { vga_put_string(OS_RELEASE, COLOR_WHITE);        vga_put_char(' ', COLOR_WHITE); }
+    if (show_v) { vga_put_string(OS_VERSION, COLOR_DARK_GREY);    vga_put_char(' ', COLOR_WHITE); }
+    if (show_m) { vga_put_string(OS_MACHINE, COLOR_YELLOW);       vga_put_char(' ', COLOR_WHITE); }
+    if (show_p) { vga_put_string(OS_PROCESSOR, COLOR_YELLOW);     vga_put_char(' ', COLOR_WHITE); }
+    if (show_i) { vga_put_string(OS_PLATFORM, COLOR_DARK_GREY);   vga_put_char(' ', COLOR_WHITE); }
+    vga_put_char('\n', COLOR_WHITE);
+}
+
+static void cmd_help(void) {
+    vga_put_string("\n  ", COLOR_WHITE);
+    vga_put_string("SYSTEM", COLOR_YELLOW);
+    vga_put_string("                 ", COLOR_WHITE);
+    vga_put_string("TOOLS", COLOR_YELLOW);
+    vga_put_string("                  ", COLOR_WHITE);
+    vga_put_string("DANGER\n", COLOR_LIGHT_RED);
+
+    vga_put_string("  help", COLOR_LIGHT_CYAN);
+    vga_put_string("    this menu    ", COLOR_DARK_GREY);
+    vga_put_string("  echo <x>", COLOR_LIGHT_CYAN);
+    vga_put_string("  print text  ", COLOR_DARK_GREY);
+    vga_put_string("  panic", COLOR_LIGHT_RED);
+    vga_put_string("  kernel panic\n", COLOR_DARK_GREY);
+
+    vga_put_string("  clear", COLOR_LIGHT_CYAN);
+    vga_put_string("   clear screen  ", COLOR_DARK_GREY);
+    vga_put_string("  history", COLOR_LIGHT_CYAN);
+    vga_put_string("   cmd history", COLOR_DARK_GREY);
+    vga_put_string("  halt", COLOR_LIGHT_RED);
+    vga_put_string("   halt CPU\n", COLOR_DARK_GREY);
+
+    vga_put_string("  fetch", COLOR_LIGHT_CYAN);
+    vga_put_string("   system info   ", COLOR_DARK_GREY);
+    vga_put_string("  colors", COLOR_LIGHT_CYAN);
+    vga_put_string("    VGA palette", COLOR_DARK_GREY);
+    vga_put_string("  reboot", COLOR_LIGHT_RED);
+    vga_put_string(" reset 8042\n", COLOR_DARK_GREY);
+
+    vga_put_string("  uname -a", COLOR_LIGHT_CYAN);
+    vga_put_string(" kernel info   ", COLOR_DARK_GREY);
+    vga_put_string("  date", COLOR_LIGHT_CYAN);
+    vga_put_string("      uptime\n", COLOR_DARK_GREY);
+
+    vga_put_string("  whoami", COLOR_LIGHT_CYAN);
+    vga_put_string("  current user   ", COLOR_DARK_GREY);
+    vga_put_string("  env", COLOR_LIGHT_CYAN);
+    vga_put_string("       variables\n", COLOR_DARK_GREY);
+
+    vga_put_string("  hostname", COLOR_LIGHT_CYAN);
+    vga_put_string(" machine name  ", COLOR_DARK_GREY);
+    vga_put_string("  mem", COLOR_LIGHT_CYAN);
+    vga_put_string("       memory map\n", COLOR_DARK_GREY);
+
+    vga_put_string("  uptime", COLOR_LIGHT_CYAN);
+    vga_put_string("  time since boot\n", COLOR_DARK_GREY);
+
+    vga_put_string("  about", COLOR_LIGHT_CYAN);
+    vga_put_string("   about jOSh\n\n", COLOR_DARK_GREY);
+    
+    // Atualização da lista de comandos de áudio
+    vga_put_string("  beep <hz> <ms>, play <name>, starwars\n", COLOR_YELLOW);
+    vga_put_string("  UP/DOWN arrows to navigate command history.\n", COLOR_DARK_GREY);
+}
+
+static void cmd_fetch(void) {
+    char buf[12];
+    vga_put_char('\n', COLOR_WHITE);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string(OS_SYSNAME, COLOR_WHITE);
+    vga_put_string(" ", COLOR_WHITE);
+    vga_put_string(OS_RELEASE, COLOR_DARK_GREY);
+    vga_put_char('\n', COLOR_WHITE);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("Kernel: ", COLOR_DARK_GREY);
+    vga_put_string(OS_MACHINE, COLOR_WHITE);
+    vga_put_string(" Monolithic Reactive\n", COLOR_WHITE);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("Shell: MiniBash Pro v2\n", COLOR_WHITE);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("Host: ", COLOR_DARK_GREY);
+    vga_put_string(OS_NODENAME, COLOR_WHITE);
+    vga_put_string(" (", COLOR_DARK_GREY);
+    vga_put_string(OS_PLATFORM, COLOR_WHITE);
+    vga_put_string(")\n", COLOR_DARK_GREY);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("Uptime: ", COLOR_DARK_GREY);
+    itoa(timer_get_uptime_hours(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("h ", COLOR_DARK_GREY);
+    itoa(timer_get_uptime_minutes(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("m ", COLOR_DARK_GREY);
+    itoa(timer_get_uptime_seconds(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("s\n", COLOR_DARK_GREY);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("GDT: Flat 4GB | IDT: 256 | PIC: remapped\n", COLOR_WHITE);
+    vga_put_string("  ######   ", COLOR_LIGHT_CYAN);
+    vga_put_string("Timer: PIT @ 100Hz | Ticks: ", COLOR_DARK_GREY);
+    itoa(timer_get_ticks(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_char('\n', COLOR_WHITE);
+}
+
+static void cmd_echo(const char* args) {
+    vga_put_string("  ", COLOR_WHITE);
+    vga_put_string(args + 5, COLOR_WHITE);
+    vga_put_char('\n', COLOR_WHITE);
+}
+
+static void cmd_mem(void) {
+    char buf[12];
+    vga_put_string("  Memory Layout:\n", COLOR_YELLOW);
+    vga_put_string("    VGA Buffer:   ", COLOR_WHITE);
+    itoa_hex(0xB8000, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("  (4000 bytes)\n", COLOR_DARK_GREY);
+    vga_put_string("    Kernel Base:  ", COLOR_WHITE);
+    itoa_hex(0x100000, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("  (1MB mark)\n", COLOR_DARK_GREY);
+    vga_put_string("    Stack (ESP):  ", COLOR_WHITE);
+    uint32_t esp; asm volatile("mov %%esp, %0" : "=r"(esp));
+    itoa_hex(esp, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_char('\n', COLOR_WHITE);
+    vga_put_string("    GDT Entries:  ", COLOR_WHITE);
+    vga_put_string("3 (Null + Code + Data)\n", COLOR_LIGHT_GREEN);
+    vga_put_string("    IDT Entries:  ", COLOR_WHITE);
+    vga_put_string("256 (3 active handlers)\n", COLOR_LIGHT_GREEN);
+}
+
+static void cmd_date(void) {
+    char buf[4];
+    uint32_t h, m, s;
+    timer_get_clock(&h, &m, &s);
+    vga_put_string("  ", COLOR_WHITE);
+    itoa_pad2(h, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_char(':', COLOR_DARK_GREY);
+    itoa_pad2(m, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_char(':', COLOR_DARK_GREY);
+    itoa_pad2(s, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("  (uptime since boot, no RTC)\n", COLOR_DARK_GREY);
+}
+
+static void cmd_uptime_display(void) {
+    char buf[12];
+    vga_put_string("  up ", COLOR_WHITE);
+    itoa(timer_get_uptime_hours(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("h ", COLOR_DARK_GREY);
+    itoa(timer_get_uptime_minutes(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("m ", COLOR_DARK_GREY);
+    itoa(timer_get_uptime_seconds(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("s  (", COLOR_DARK_GREY);
+    itoa(timer_get_ticks(), buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string(" ticks @ 100Hz)\n", COLOR_DARK_GREY);
+    vga_put_string("  ", COLOR_WHITE);
+    itoa(cmd_count, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string(" commands executed\n", COLOR_DARK_GREY);
+}
+
+static void cmd_env(void) {
+    vga_put_string("  USER=", COLOR_DARK_GREY); vga_put_string(SHELL_USER, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  HOSTNAME=", COLOR_DARK_GREY); vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  PWD=", COLOR_DARK_GREY); vga_put_string(SHELL_CWD, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  SHELL=/bin/minibash", COLOR_DARK_GREY);
+    vga_put_string("\n  TERM=vga80x25", COLOR_DARK_GREY);
+    vga_put_string("\n  ARCH=", COLOR_DARK_GREY); vga_put_string(OS_MACHINE, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  SYSNAME=", COLOR_DARK_GREY); vga_put_string(OS_SYSNAME, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  RELEASE=", COLOR_DARK_GREY); vga_put_string(OS_RELEASE, COLOR_LIGHT_GREEN);
+    vga_put_string("\n  TIMER_HZ=100\n", COLOR_DARK_GREY);
+}
+
+static void cmd_colors(void) {
+    vga_put_string("  VGA 16-color palette:\n  ", COLOR_WHITE);
+    for (uint8_t i = 0; i < 16; i++) {
+        vga_put_char((char)0xDB, i);
+        vga_put_char((char)0xDB, i);
+        vga_put_char(' ', COLOR_WHITE);
+    }
+    vga_put_char('\n', COLOR_WHITE);
+}
+
+static void cmd_history_list(void) {
+    if (history_count == 0) {
+        vga_put_string("  (empty history)\n", COLOR_DARK_GREY); return;
+    }
+    char buf[4];
+    int start = (history_count < HISTORY_SIZE) ? 0 : history_write;
+    for (int i = 0; i < history_count; i++) {
+        int idx = (start + i) % HISTORY_SIZE;
+        vga_put_string("  ", COLOR_WHITE);
+        itoa(i + 1, buf); vga_put_string(buf, COLOR_DARK_GREY);
+        vga_put_string("  ", COLOR_WHITE);
+        vga_put_string(history[idx], COLOR_LIGHT_GREY);
+        vga_put_char('\n', COLOR_WHITE);
+    }
+}
+
+static void cmd_about(void) {
+    vga_put_char('\n', COLOR_WHITE);
+    vga_put_string("  jOSh OS", COLOR_LIGHT_CYAN);
+    vga_put_string(" - by ", COLOR_DARK_GREY);
+    vga_put_string("Fermi Hart\n", COLOR_WHITE);
+    vga_put_string("  A bare-metal x86 operating system built from scratch.\n", COLOR_WHITE);
+    vga_put_string("  No libc. No stdlib. No safety net.\n", COLOR_DARK_GREY);
+    vga_put_string("  Dedicated to Josh.\n\n", COLOR_LIGHT_MAGENTA);
+    vga_put_string("  github.com/fermihart | contact@fermihart.com\n", COLOR_LIGHT_BLUE);
+}
+
+static void cmd_reboot(void) {
+    vga_put_string("  Rebooting via 8042...\n", COLOR_YELLOW);
+    uint8_t tmp;
+    do { asm volatile("inb $0x64, %0" : "=a"(tmp)); } while (tmp & 0x02);
+    asm volatile("outb %0, $0x64" : : "a"((uint8_t)0xFE));
+    asm volatile("cli; hlt");
+}
+
+/* ── Comandos de Áudio ─────────────────────────────────────────── */
+static void cmd_beep(const char* args) {
+    char buf[12]; 
+    
+    const char* p = args + 5; /* Pula "beep " */
+    while (*p == ' ') p++;
+    
+    uint32_t freq = 0, dur = 0;
+    
+    /* Parse Freq */
+    while (*p >= '0' && *p <= '9') {
+        freq = freq * 10 + (*p - '0');
+        p++;
+    }
+    while (*p == ' ') p++;
+    
+    /* Parse Duracao */
+    while (*p >= '0' && *p <= '9') {
+        dur = dur * 10 + (*p - '0');
+        p++;
+    }
+
+    if (freq == 0 || dur == 0) {
+        vga_put_string("  Uso: beep <freq_hz> <dur_ms>\n", COLOR_LIGHT_RED);
+        vga_put_string("  Ex: beep 440 1000\n", COLOR_DARK_GREY);
+        return;
+    }
+
+    vga_put_string("  Toccando ", COLOR_WHITE);
+    itoa(freq, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("Hz por ", COLOR_WHITE);
+    itoa(dur, buf); vga_put_string(buf, COLOR_LIGHT_GREEN);
+    vga_put_string("ms...\n", COLOR_WHITE);
+
+    speaker_beep(freq, dur);
+}
+
+static void cmd_play(const char* args) {
+    const char* name = args + 5;
+    while (*name == ' ') name++;
+
+    if (str_compare(name, "tetris") == 0) {
+        vga_put_string("  Playing Tetris Theme...\n", COLOR_YELLOW);
+        speaker_beep(659, 100); speaker_beep(659, 100); speaker_beep(659, 100);
+        speaker_beep(523, 100); speaker_beep(523, 100); speaker_beep(523, 100);
+        speaker_beep(493, 100); speaker_beep(493, 100); speaker_beep(493, 100);
+        speaker_beep(587, 100); speaker_beep(587, 100); speaker_beep(587, 100);
+        speaker_beep(659, 100); speaker_beep(659, 100); speaker_beep(659, 100);
+        speaker_beep(698, 200);
+        vga_put_string("  Done!\n", COLOR_GREEN);
+    }
+    else if (str_compare(name, "startup") == 0) {
+        vga_put_string("  Power On Sound...\n", COLOR_CYAN);
+        speaker_beep(220, 200);
+        speaker_beep(330, 200);
+        speaker_beep(440, 400);
+        vga_put_string("  Ready.\n", COLOR_GREEN);
+    }
+    else {
+        vga_put_string("  Unknown melody. Try: tetris, startup\n", COLOR_LIGHT_RED);
+    }
+}
+
+// NOVO COMANDO: Star Wars (Modo Suave)
+static void cmd_starwars(void) {
+    vga_put_string("  Playing Imperial March (Soft Mode)...\n", COLOR_YELLOW);
+    
+    // Notas da Marcha Imperial (Frequências aproximadas)
+    // Usando frequências redondas próximas para simplicidade no PIT
+    
+    // Parte 1
+    speaker_beep_soft(165, 150); speaker_beep_soft(165, 150); speaker_beep_soft(165, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(208, 150); speaker_beep_soft(208, 150); speaker_beep_soft(208, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(262, 150); speaker_beep_soft(262, 150); speaker_beep_soft(262, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(247, 150); speaker_beep_soft(247, 150); speaker_beep_soft(247, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(220, 150); speaker_beep_soft(220, 150); speaker_beep_soft(208, 300);
+    
+    nosound_delay_ms(200);
+    
+    // Parte 2 (Variação)
+    speaker_beep_soft(262, 150); speaker_beep_soft(262, 150); speaker_beep_soft(262, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(294, 150); speaker_beep_soft(294, 150); speaker_beep_soft(294, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(330, 150); speaker_beep_soft(330, 150); speaker_beep_soft(330, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(370, 150); speaker_beep_soft(370, 150); speaker_beep_soft(370, 150);
+    nosound_delay_ms(100);
+    speaker_beep_soft(330, 150); speaker_beep_soft(330, 150); speaker_beep_soft(294, 300);
+
+    vga_put_string("  Done!\n", COLOR_GREEN);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Command Dispatcher
+ * ══════════════════════════════════════════════════════════════════ */
+static void execute_command(void) {
+    cmd_buffer[cmd_idx] = '\0';
+
+    /* Trim trailing spaces (tab completion adds a space after the command) */
+    while (cmd_idx > 0 && cmd_buffer[cmd_idx - 1] == ' ') {
+        cmd_idx--;
+        cmd_buffer[cmd_idx] = '\0';
+    }
+
+    save_to_history(cmd_buffer);
+    history_browse = -1;
+    cmd_count++;
+
+    vga_put_char('\n', COLOR_WHITE);
+
+    if (cmd_idx == 0) { /* empty */ }
+    else if (str_compare(cmd_buffer, "help") == 0) cmd_help();
+    else if (str_compare(cmd_buffer, "clear") == 0) { vga_clear(); draw_status_bar(); }
+    else if (str_compare(cmd_buffer, "fetch") == 0) cmd_fetch();
+    else if (str_starts_with(cmd_buffer, "uname")) cmd_uname(cmd_buffer);
+    else if (str_starts_with(cmd_buffer, "beep ")) cmd_beep(cmd_buffer);
+    else if (str_compare(cmd_buffer, "beep") == 0) {
+        vga_put_string("  Uso: beep <freq_hz> <dur_ms>\n", COLOR_LIGHT_RED);
+        vga_put_string("  Ex: beep 440 1000\n", COLOR_DARK_GREY);
+    }
+    else if (str_starts_with(cmd_buffer, "play ")) cmd_play(cmd_buffer);
+    else if (str_compare(cmd_buffer, "play") == 0) {
+        vga_put_string("  Uso: play <melody>\n", COLOR_LIGHT_RED);
+        vga_put_string("  Melodies: tetris, startup\n", COLOR_DARK_GREY);
+    }
+    else if (str_compare(cmd_buffer, "starwars") == 0) cmd_starwars(); // NOVO
+    else if (str_compare(cmd_buffer, "whoami") == 0) {
+        vga_put_string("  ", COLOR_WHITE); vga_put_string(SHELL_USER, COLOR_LIGHT_GREEN);
+        vga_put_char('\n', COLOR_WHITE);
+    }
+    else if (str_compare(cmd_buffer, "hostname") == 0) {
+        vga_put_string("  ", COLOR_WHITE); vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN);
+        vga_put_char('\n', COLOR_WHITE);
+    }
+    else if (str_compare(cmd_buffer, "date") == 0) cmd_date();
+    else if (str_compare(cmd_buffer, "uptime") == 0) cmd_uptime_display();
+    else if (str_compare(cmd_buffer, "mem") == 0) cmd_mem();
+    else if (str_compare(cmd_buffer, "env") == 0) cmd_env();
+    else if (str_compare(cmd_buffer, "colors") == 0) cmd_colors();
+    else if (str_compare(cmd_buffer, "history") == 0) cmd_history_list();
+    else if (str_compare(cmd_buffer, "about") == 0) cmd_about();
+    else if (str_starts_with(cmd_buffer, "echo ")) cmd_echo(cmd_buffer);
     else if (str_compare(cmd_buffer, "ver") == 0) {
-        vga_put_string("Fermi Hart OS [Version 1.2.54-Pro]", COLOR_WHITE);
+        vga_put_string("  ", COLOR_WHITE); vga_put_string(OS_SYSNAME, COLOR_LIGHT_CYAN);
+        vga_put_string(" [", COLOR_WHITE); vga_put_string(OS_RELEASE, COLOR_WHITE);
+        vga_put_string("]\n", COLOR_WHITE);
     }
     else if (str_compare(cmd_buffer, "panic") == 0) {
         vga_clear();
-        vga_put_string("KERNEL PANIC: User triggered panic test.", COLOR_LIGHT_RED);
+        vga_put_string("KERNEL PANIC: User triggered panic test.\n", COLOR_LIGHT_RED);
+        vga_put_string("System halted. Reboot required.", COLOR_WHITE);
         asm volatile("cli; hlt");
     }
     else if (str_compare(cmd_buffer, "halt") == 0) {
-        vga_put_string("Powering down...", COLOR_WHITE);
-        asm volatile("hlt");
+        vga_put_string("  Powering down...\n", COLOR_WHITE);
+        asm volatile("cli; hlt");
     }
-    else if (cmd_idx > 0) {
-        vga_put_string("MiniBash: '", COLOR_WHITE);
+    else if (str_compare(cmd_buffer, "reboot") == 0) cmd_reboot();
+    else {
+        vga_put_string("  minibash: ", COLOR_WHITE);
         vga_put_string(cmd_buffer, COLOR_LIGHT_RED);
-        vga_put_string("' not found.\n", COLOR_WHITE);
+        vga_put_string(": command not found\n", COLOR_WHITE);
     }
 
-    for(int i=0; i<MAX_CMD_LEN; i++) cmd_buffer[i] = 0;
+    for (int i = 0; i < MAX_CMD_LEN; i++) cmd_buffer[i] = 0;
     cmd_idx = 0;
-    
     print_prompt();
 }
 
-// Função auxiliar para converter hex para string de debug
-static void print_hex_debug(uint8_t val) {
-    char hex_chars[] = "0123456789ABCDEF";
-    vga_put_string(" [0x", COLOR_DARK_GREY);
-    vga_put_char(hex_chars[(val >> 4) & 0xF], COLOR_DARK_GREY);
-    vga_put_char(hex_chars[val & 0xF], COLOR_DARK_GREY);
-    vga_put_char(']', COLOR_DARK_GREY);
-}
-
-void start_shell() {
+/* ══════════════════════════════════════════════════════════════════
+ *  Shell entry point
+ * ══════════════════════════════════════════════════════════════════ */
+void start_shell(void) {
     vga_clear();
+    draw_status_bar();
+
     vga_put_string("Welcome to ", COLOR_WHITE);
-    vga_put_string("Fermi Hart OS Pro\n", COLOR_LIGHT_CYAN);
-    vga_put_string("Type 'help' for available tools.\n", COLOR_DARK_GREY);
-    vga_put_string("System is in POLLING MODE (IDT Disabled).\n", COLOR_RED);
-    vga_put_string("Debug: Teclas mostrarão [0xXX].\n", COLOR_DARK_GREY);
+    vga_put_string("jOSh OS", COLOR_LIGHT_CYAN);
+    vga_put_string(" (", COLOR_DARK_GREY);
+    vga_put_string(OS_NODENAME, COLOR_LIGHT_GREEN);
+    vga_put_string(")\n", COLOR_DARK_GREY);
+    vga_put_string("Type 'help' for available commands.\n", COLOR_DARK_GREY);
+
     print_prompt();
-    
-    while(1) {
-        uint8_t scancode = 0;
-        char c = 0;
 
-        // --- POLLING DIRETO NO HARDWARE (Fallback Robusto) ---
-        // Lê status da porta 0x64
-        uint8_t status;
-        asm volatile("inb $0x64, %0" : "=a"(status));
-        
-        // Se bit 0 estiver setado, há dado na porta 0x60
-        if (status & 1) {
-            asm volatile("inb $0x60, %0" : "=a"(scancode));
-            
-            // Ignora key release (bit 7 set)
-            if (scancode & 0x80) continue;
+    while (1) {
+        char c = get_key_from_buffer();
+        if (c == 0) { asm volatile("hlt"); continue; }
 
-            // Converte para caractere
-            c = keycode_to_char(scancode);
-            
-            // DEBUG: Mostra o código bruto da tecla
-            print_hex_debug(scancode);
-        } else {
-            // Sem tecla, continua o loop sem travar
+        draw_status_bar();
+
+        if (c == KEY_UP)   { history_up();   continue; }
+        if (c == KEY_DOWN) { history_down(); continue; }
+        if (c == '\n')     { execute_command(); continue; }
+        if (c == '\b') {
+            if (cmd_idx > 0) { cmd_idx--; cmd_buffer[cmd_idx] = '\0'; vga_put_char('\b', COLOR_WHITE); }
             continue;
         }
-
-        // Se a conversão falhou (tecla especial não mapeada), ignora
-        if (c == 0) continue;
-
-        if (c == '\n') {
-            execute_command();
-        } else if (c == '\b') {
-            if (cmd_idx > 0) {
-                cmd_idx--;
-                vga_put_char('\b', COLOR_WHITE); // Apaga visualmente
-            }
-        } else if (cmd_idx < MAX_CMD_LEN - 1) {
+        if (c == '\t') { tab_complete(); continue; }
+        if (cmd_idx < MAX_CMD_LEN - 1) {
             cmd_buffer[cmd_idx++] = c;
-            vga_put_char(c, COLOR_WHITE); // Eco imediato
+            vga_put_char(c, COLOR_WHITE);
         }
     }
 }

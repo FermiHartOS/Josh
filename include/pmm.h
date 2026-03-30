@@ -22,75 +22,41 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
+
+#ifndef PMM_H
+#define PMM_H
+
+#include <stdint.h>
+
+#define PAGE_SIZE 4096
+
 /**
- * @file drivers/nosound/nosound.c
- * @brief PC Speaker Driver — Beeps, melodies, PWM soft tones
+ * @brief Inicializa o Physical Memory Manager.
+ * @param total_kb   Total de KB de RAM acima de 1MB (do multiboot mem_upper).
+ * @param kernel_end Endereço do fim do kernel (símbolo _kernel_end do linker).
+ *
+ * O bitmap é colocado logo após _kernel_end.
+ * Páginas do kernel e do próprio bitmap são marcadas como usadas.
  */
+void pmm_init(uint32_t total_kb, uint32_t kernel_end);
 
-#include <nosound.h>
+/**
+ * @brief Aloca uma página física de 4KB.
+ * @return Endereço físico da página, ou 0 se não houver memória.
+ */
+uint32_t pmm_alloc_page(void);
 
-/* ── Ports ─────────────────────────────────────────────── */
-#define SPEAKER_CTRL_PORT 0x61
-#define PIT_COMMAND_PORT  0x43
-#define PIT_CH2_PORT      0x42
+/**
+ * @brief Libera uma página física de 4KB.
+ * @param addr Endereço físico da página (deve ser alinhado a 4KB).
+ */
+void pmm_free_page(uint32_t addr);
 
-/* ── Helpers ───────────────────────────────────────────── */
-static inline void outb(uint16_t port, uint8_t val) {
-    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
-}
+/* ── Estatísticas ─────────────────────────────────────────────── */
+uint32_t pmm_get_total_pages(void);
+uint32_t pmm_get_used_pages(void);
+uint32_t pmm_get_free_pages(void);
+uint32_t pmm_get_total_kb(void);
+uint32_t pmm_get_free_kb(void);
 
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    asm volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
-void nosound_delay_ms(uint32_t ms) {
-    for (uint32_t i = 0; i < ms; i++) {
-        for (volatile int j = 0; j < 50000; j++);
-    }
-}
-
-void speaker_init(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    val |= 0x03;
-    outb(SPEAKER_CTRL_PORT, val);
-}
-
-void speaker_set_freq(uint32_t freq) {
-    if (freq == 0) return;
-    uint32_t divisor = 1193182 / freq;
-    outb(PIT_COMMAND_PORT, 0xB6);
-    outb(PIT_CH2_PORT, (uint8_t)(divisor & 0xFF));
-    outb(PIT_CH2_PORT, (uint8_t)((divisor >> 8) & 0xFF));
-}
-
-void speaker_on(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    outb(SPEAKER_CTRL_PORT, val | 0x03);
-}
-
-void speaker_off(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    outb(SPEAKER_CTRL_PORT, val & 0xFC);
-}
-
-void speaker_beep(uint32_t freq, uint32_t duration_ms) {
-    speaker_set_freq(freq);
-    speaker_on();
-    nosound_delay_ms(duration_ms);
-    speaker_off();
-}
-
-void speaker_beep_soft(uint32_t freq, uint32_t duration_ms) {
-    if (freq == 0 || duration_ms == 0) return;
-    speaker_set_freq(freq);
-    uint32_t pulses = duration_ms / 20;
-    for (uint32_t i = 0; i < pulses; i++) {
-        speaker_on();
-        nosound_delay_ms(10);
-        speaker_off();
-        nosound_delay_ms(10);
-    }
-    speaker_off();
-}
+#endif /* PMM_H */

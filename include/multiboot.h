@@ -22,75 +22,31 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
+
+#ifndef MULTIBOOT_H
+#define MULTIBOOT_H
+
+#include <stdint.h>
+
+#define MULTIBOOT_MAGIC 0x2BADB002
+
 /**
- * @file drivers/nosound/nosound.c
- * @brief PC Speaker Driver — Beeps, melodies, PWM soft tones
+ * @brief Multiboot info structure (campos que nos interessam).
+ *        Passada pelo GRUB no registrador EBX.
+ *
+ *  flags bit 0 → mem_lower e mem_upper válidos
+ *  mem_lower = KB de RAM abaixo de 1MB (tipicamente 640)
+ *  mem_upper = KB de RAM acima de 1MB
  */
+typedef struct {
+    uint32_t flags;
+    uint32_t mem_lower;    /* KB abaixo de 1MB */
+    uint32_t mem_upper;    /* KB acima de 1MB */
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    /* ... mais campos que não usamos agora */
+} __attribute__((packed)) multiboot_info_t;
 
-#include <nosound.h>
-
-/* ── Ports ─────────────────────────────────────────────── */
-#define SPEAKER_CTRL_PORT 0x61
-#define PIT_COMMAND_PORT  0x43
-#define PIT_CH2_PORT      0x42
-
-/* ── Helpers ───────────────────────────────────────────── */
-static inline void outb(uint16_t port, uint8_t val) {
-    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    asm volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
-void nosound_delay_ms(uint32_t ms) {
-    for (uint32_t i = 0; i < ms; i++) {
-        for (volatile int j = 0; j < 50000; j++);
-    }
-}
-
-void speaker_init(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    val |= 0x03;
-    outb(SPEAKER_CTRL_PORT, val);
-}
-
-void speaker_set_freq(uint32_t freq) {
-    if (freq == 0) return;
-    uint32_t divisor = 1193182 / freq;
-    outb(PIT_COMMAND_PORT, 0xB6);
-    outb(PIT_CH2_PORT, (uint8_t)(divisor & 0xFF));
-    outb(PIT_CH2_PORT, (uint8_t)((divisor >> 8) & 0xFF));
-}
-
-void speaker_on(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    outb(SPEAKER_CTRL_PORT, val | 0x03);
-}
-
-void speaker_off(void) {
-    uint8_t val = inb(SPEAKER_CTRL_PORT);
-    outb(SPEAKER_CTRL_PORT, val & 0xFC);
-}
-
-void speaker_beep(uint32_t freq, uint32_t duration_ms) {
-    speaker_set_freq(freq);
-    speaker_on();
-    nosound_delay_ms(duration_ms);
-    speaker_off();
-}
-
-void speaker_beep_soft(uint32_t freq, uint32_t duration_ms) {
-    if (freq == 0 || duration_ms == 0) return;
-    speaker_set_freq(freq);
-    uint32_t pulses = duration_ms / 20;
-    for (uint32_t i = 0; i < pulses; i++) {
-        speaker_on();
-        nosound_delay_ms(10);
-        speaker_off();
-        nosound_delay_ms(10);
-    }
-    speaker_off();
-}
+#endif /* MULTIBOOT_H */

@@ -22,41 +22,36 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-/**
- * @file kernel/kernel.c
- * @brief Entry point do jOSh OS - Monólito Reativo (IDT Ativa)
- */
+
+#ifndef KMALLOC_H
+#define KMALLOC_H
 
 #include <stdint.h>
-#include <vga.h>
-#include <keyboard.h>
-#include <shell.h>
-#include <gdt.h>
-#include <idt.h>
 
-void kernel_main() {
-    vga_init();
-    vga_clear();
+/**
+ * @brief Inicializa o heap do kernel.
+ *        Pede páginas ao PMM e cria a free list inicial.
+ * @param initial_pages Número de páginas de 4KB para o heap inicial.
+ */
+void heap_init(uint32_t initial_pages);
 
-    vga_put_string("jOSh OS [Reactive Monolithic Kernel]\n", COLOR_CYAN);
-    
-    // --- 1. Instala a GDT ---
-    gdt_install();
-    vga_put_string("[GDT] Memory Segments Initialized... OK\n", COLOR_GREEN);
+/**
+ * @brief Aloca 'size' bytes no heap do kernel.
+ *        First-fit com split se o bloco for grande o suficiente.
+ * @return Ponteiro para a memória alocada, ou 0 (NULL) se falhar.
+ */
+void* kmalloc(uint32_t size);
 
-    // --- 2. Instala a IDT ---
-    idt_install();
-    vga_put_string("[IDT] Interrupt Vector Table Installed... OK\n", COLOR_GREEN);
-    vga_put_string("[CPU] Hardware Interrupts ENABLED (STI)... OK\n", COLOR_LIGHT_GREEN);
+/**
+ * @brief Libera memória alocada com kmalloc.
+ *        Faz merge com blocos adjacentes livres.
+ */
+void kfree(void* ptr);
 
-    vga_put_string("\nLoading System Modules: ", COLOR_LIGHT_GREY);
-    for(int i = 0; i < 20; i++) {
-        vga_put_char('#', COLOR_GREEN);
-        for(volatile int d = 0; d < 2000000; d++); 
-    }
-    vga_put_string(" DONE!\n\n", COLOR_GREEN);
-    vga_put_string("The system is now REACTIVE. Waiting for events...\n", COLOR_WHITE);
+/* ── Estatísticas ─────────────────────────────────────────────── */
+uint32_t heap_get_total(void);
+uint32_t heap_get_used(void);
+uint32_t heap_get_free(void);
+uint32_t heap_get_alloc_count(void);
 
-    // Inicia o Shell interativo
-    start_shell();
-}
+#endif /* KMALLOC_H */
