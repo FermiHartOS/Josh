@@ -22,59 +22,80 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
+
+/*
+ *  AUTHOR: F E R M I  ∞  H A R T <contact@fermihart.com>
+ *  PROJECT: jOSh - Operating System
+ */
 /**
  * @file kernel/idt.c
- * @brief Implementação da Interrupt Descriptor Table (IDT) para o jOSh OS.
+ * @brief IDT + PIC remapping + PIT timer init
  */
 
 #include <idt.h>
 #include <vga.h>
 #include <keyboard.h>
+#include <timer.h>
 
-// Tabela global de 256 entradas
-static struct idt_entry idt[256];
-static struct idt_ptr idtp;
+static idt_entry_t idt[256];
+static idt_ptr_t   idtp;
 
-// Protótipos dos handlers (implementados em ASM em idt.asm)
-extern void irq0_handler();
-extern void irq1_handler();
-extern void div_by_zero_handler();
+extern void irq_handler_keyboard(void);
+extern void irq_handler_timer(void);
+extern void exception_div_zero(void);
+extern void idt_load(uint32_t);
 
-// Função auxiliar para configurar uma porta
-void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
-    idt[num].offset_low = base & 0xFFFF;
-    idt[num].offset_high = (base >> 16) & 0xFFFF;
-    idt[num].selector = sel;
-    idt[num].zero = 0;
-    idt[num].type_attr = flags;
+static inline void outb(uint16_t port, uint8_t val) {
+    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-// Função externa definida em ASM para carregar o registrador IDTR
-extern void idt_load(uint32_t base, uint16_t limit);
+static inline void io_wait(void) {
+    asm volatile("outb %%al, $0x80" : : "a"(0));
+}
 
-void idt_install() {
-    // Limpa a tabela inteira
+static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+    idt[num].base_low    = base & 0xFFFF;
+    idt[num].selector    = sel;
+    idt[num].always_zero = 0;
+    idt[num].flags       = flags;
+    idt[num].base_high   = (base >> 16) & 0xFFFF;
+}
+
+static void pic_remap(void) {
+    outb(0x20, 0x11);  io_wait();
+    outb(0xA0, 0x11);  io_wait();
+    outb(0x21, 0x20);  io_wait();
+    outb(0xA1, 0x28);  io_wait();
+    outb(0x21, 0x04);  io_wait();
+    outb(0xA1, 0x02);  io_wait();
+    outb(0x21, 0x01);  io_wait();
+    outb(0xA1, 0x01);  io_wait();
+
+    outb(0x21, 0xFC);  /* IRQ0 + IRQ1 only */
+    outb(0xA1, 0xFF);
+}
+
+void idt_install(void) {
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
 
-    // Configura o ponteiro
-    idtp.limit = sizeof(struct idt_entry) * 256 - 1;
-    idtp.base = (uint32_t)&idt;
+    idtp.limit = sizeof(idt_entry_t) * 256 - 1;
+    idtp.base  = (uint32_t)&idt;
 
-    // --- Exceções Críticas (CPU) ---
-    // Divisão por zero (vetor 0)
-    idt_set_gate(0, (uint32_t)div_by_zero_handler, 0x08, 0x8E);
+    pic_remap();
 
-    // --- IRQs de Hardware (Mapeados a partir de 0x20) ---
-    // Timer (IRQ0) -> Vetor 0x20
-    idt_set_gate(IRQ0_VECTOR, (uint32_t)irq0_handler, 0x08, 0x8E);
-    
-    // Teclado (IRQ1) -> Vetor 0x21
-    idt_set_gate(IRQ1_VECTOR, (uint32_t)irq1_handler, 0x08, 0x8E);
+    /* Configura PIT a 100 Hz (10ms por tick) */
+    timer_init(100);
 
-    // Carrega a IDT no processador via instrução LGDT
-    idt_load((uint32_t)&idtp, idtp.limit);
-    
-    vga_put_string("[IDT] Table Installed Successfully.\n", COLOR_GREEN);
+    /* Exceções */
+    idt_set_gate(0, (uint32_t)exception_div_zero, 0x08, 0x8E);
+
+    /* IRQs */
+    idt_set_gate(0x20, (uint32_t)irq_handler_timer,    0x08, 0x8E);
+    idt_set_gate(0x21, (uint32_t)irq_handler_keyboard, 0x08, 0x8E);
+
+    idt_load((uint32_t)&idtp);
+
+    vga_put_string("[IDT] PIC remapped. PIT @ 100Hz. Interrupts ON.\n", COLOR_GREEN);
 }

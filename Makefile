@@ -10,23 +10,25 @@ CFLAGS  = -m32 -ffreestanding -O2 -Wall -Wextra -Wpedantic -Werror \
 # Flags do Linker
 LDFLAGS = -m32 -T Linker.ld -nostdlib -z noexecstack -no-pie -n -Wl,--build-id=none
 
-# Mapeamento de Objetos (Organizado por subpastas)
+# Mapeamento de Objetos
 OBJS = build/boot.o \
        build/kernel.o \
        build/gdt.o \
+       build/timer.o \
        build/vga.o \
        build/keyboard.o \
        build/minibash.o \
        build/idt.o \
- 	build/idt_asm.o
- 	
+       build/idt_asm.o \
+       build/nosound.o
+
 all: build_dir $(IMG) verify
 
 $(IMG): $(OBJS)
 	@echo "[LINK] $@"
 	@$(CC) $(LDFLAGS) -o $@ $(OBJS) -lgcc
 
-# Regras de Compilação (Busca em todos os subdiretórios)
+# Regras de Compilação
 build/boot.o: boot/boot.asm
 	@echo "[AS] $<"
 	@$(AS) -f elf32 $< -o $@
@@ -36,6 +38,10 @@ build/kernel.o: kernel/kernel.c
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 build/gdt.o: kernel/gdt.c
+	@echo "[KERN] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+build/timer.o: kernel/timer.c
 	@echo "[KERN] $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
@@ -59,6 +65,9 @@ build/idt_asm.o: kernel/idt.asm
 	@echo "[AS] $<"
 	@$(AS) -f elf32 $< -o $@
 
+build/nosound.o: drivers/nosound/nosound.c
+	@echo "[DRV] $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 build_dir:
 	@mkdir -p build

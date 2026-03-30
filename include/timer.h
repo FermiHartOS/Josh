@@ -23,28 +23,35 @@
  * ____________________________________________________________________________
  */
 
-/*
- * include/idt.h - Estrutura Simples da IDT
- */
-
-#ifndef IDT_H
-#define IDT_H
+#ifndef TIMER_H
+#define TIMER_H
 
 #include <stdint.h>
 
-typedef struct {
-    uint16_t base_low;
-    uint16_t selector;
-    uint8_t  always_zero;
-    uint8_t  flags;
-    uint16_t base_high;
-} __attribute__((packed)) idt_entry_t;
+/**
+ * @brief Configura o PIT (Programmable Interval Timer) channel 0.
+ *        Frequência padrão: 100 Hz (10ms por tick).
+ *        Chamado dentro de idt_install().
+ */
+void timer_init(uint32_t frequency);
 
-typedef struct {
-    uint16_t limit;
-    uint32_t base;
-} __attribute__((packed)) idt_ptr_t;
+/**
+ * @brief Chamado pelo handler ASM do IRQ0 a cada tick.
+ *        Incrementa contador global e atualiza tempo.
+ */
+void timer_tick_handler(void);
 
-void idt_install(void);
+/* ── Getters de tempo (calculados a partir dos ticks) ─────── */
+uint32_t timer_get_ticks(void);
+uint32_t timer_get_seconds(void);
+uint32_t timer_get_uptime_hours(void);
+uint32_t timer_get_uptime_minutes(void);
+uint32_t timer_get_uptime_seconds(void);
 
-#endif
+/**
+ * @brief Preenche os campos de um "relógio" simples.
+ *        Como não temos RTC, começa em 00:00:00 no boot.
+ */
+void timer_get_clock(uint32_t* hours, uint32_t* minutes, uint32_t* secs);
+
+#endif /* TIMER_H */

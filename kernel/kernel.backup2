@@ -22,29 +22,41 @@
  *  https://open.spotify.com/playlist/6flrLsdYxQZvGNRkdohL7o?si=eH9ZDz8DSqCjJX1Pa9henA
  * ____________________________________________________________________________
  */
-
-/*
- * include/idt.h - Estrutura Simples da IDT
+/**
+ * @file kernel/kernel.c
+ * @brief Entry point do jOSh OS - Monólito Reativo (IDT Ativa)
  */
 
-#ifndef IDT_H
-#define IDT_H
-
 #include <stdint.h>
+#include <vga.h>
+#include <keyboard.h>
+#include <shell.h>
+#include <gdt.h>
+#include <idt.h>
 
-typedef struct {
-    uint16_t base_low;
-    uint16_t selector;
-    uint8_t  always_zero;
-    uint8_t  flags;
-    uint16_t base_high;
-} __attribute__((packed)) idt_entry_t;
+void kernel_main() {
+    vga_init();
+    vga_clear();
 
-typedef struct {
-    uint16_t limit;
-    uint32_t base;
-} __attribute__((packed)) idt_ptr_t;
+    vga_put_string("jOSh OS [Reactive Monolithic Kernel]\n", COLOR_CYAN);
+    
+    // --- 1. Instala a GDT ---
+    gdt_install();
+    vga_put_string("[GDT] Memory Segments Initialized... OK\n", COLOR_GREEN);
 
-void idt_install(void);
+    // --- 2. Instala a IDT ---
+    idt_install();
+    vga_put_string("[IDT] Interrupt Vector Table Installed... OK\n", COLOR_GREEN);
+    vga_put_string("[CPU] Hardware Interrupts ENABLED (STI)... OK\n", COLOR_LIGHT_GREEN);
 
-#endif
+    vga_put_string("\nLoading System Modules: ", COLOR_LIGHT_GREY);
+    for(int i = 0; i < 20; i++) {
+        vga_put_char('#', COLOR_GREEN);
+        for(volatile int d = 0; d < 2000000; d++); 
+    }
+    vga_put_string(" DONE!\n\n", COLOR_GREEN);
+    vga_put_string("The system is now REACTIVE. Waiting for events...\n", COLOR_WHITE);
+
+    // Inicia o Shell interativo
+    start_shell();
+}
